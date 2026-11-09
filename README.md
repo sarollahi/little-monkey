@@ -8,18 +8,18 @@
 
 Give an agent a real repository task, control what tools it can use, and inspect the tests and diff before accepting a result. Use a model on your machine or a provider you configure.
 
-[![CI on develop](https://github.com/AA-Box/little-monkey/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/AA-Box/little-monkey/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/AA-Box/little-monkey?label=stable)](https://github.com/AA-Box/little-monkey/releases/latest)
+[![Release](https://github.com/sarollahi/little-monkey/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/sarollahi/little-monkey/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/sarollahi/little-monkey?label=stable)](https://github.com/sarollahi/little-monkey/releases/latest)
 [![MIT](https://img.shields.io/badge/license-MIT-6f4e37)](LICENSE)
 [![macOS, Windows, Linux](https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-6f4e37)](docs/setup.md)
 
-### [Download the latest stable release](https://github.com/AA-Box/little-monkey/releases/latest) · [Try a real coding task](docs/first-run.md) · [Check limitations](docs/limitations.md)
+### [Download the latest stable release](https://github.com/sarollahi/little-monkey/releases/latest) · [Try a real coding task](docs/first-run.md) · [Check limitations](docs/limitations.md)
 
 [Quick start](#quick-start) · [Features](docs/features.md) · [Security](docs/security.md) · [Contribute](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
 
 </div>
 
-> **Release vs. development:** You are reading the `develop` branch. Its feature and limitation docs describe the **development tree**, which can contain changes not included in the latest published installer. Before relying on a capability in an installed version, check the [latest release notes](https://github.com/AA-Box/little-monkey/releases/latest) and select that release's tag in GitHub to read its matching documentation. `main` is the release branch; `develop` is not a release promise.
+> **Release vs. development:** You are reading the `develop` branch. Its feature and limitation docs describe the **development tree**, which can contain changes not included in the latest published installer. Before relying on a capability in an installed version, check the [latest release notes](https://github.com/sarollahi/little-monkey/releases/latest) and select that release's tag in GitHub to read its matching documentation. `main` is the release branch; `develop` is not a release promise.
 
 ## Watch the workflow, then try it
 
@@ -83,7 +83,7 @@ Nothing reaches a runtime without passing the middle row. That is the whole desi
 
 ## Install
 
-Take the installer for your platform from the [**latest release**](https://github.com/AA-Box/little-monkey/releases/latest):
+Take the installer for your platform from the [**latest release**](https://github.com/sarollahi/little-monkey/releases/latest):
 
 | macOS | Windows | Linux |
 | :-- | :-- | :-- |
@@ -191,7 +191,7 @@ monkey security egress-evidence     # allowed destinations beside refused ones
 monkey security admission-trail     # the run behind each scheduling decision
 ```
 
-Boundaries in full: **[docs/security.md](docs/security.md)**. Vulnerabilities go through a [private advisory](https://github.com/AA-Box/little-monkey/security/advisories/new), never a public issue — see [SECURITY.md](SECURITY.md).
+Boundaries in full: **[docs/security.md](docs/security.md)**. Vulnerabilities go through a [private advisory](https://github.com/sarollahi/little-monkey/security/advisories/new), never a public issue — see [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
