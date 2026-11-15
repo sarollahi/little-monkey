@@ -230,6 +230,7 @@ fn valid_transition(from: &str, to: &str) -> bool {
             | ("opening_pr", "awaiting_review")
             | ("opening_pr", "monitoring_ci")
             | ("awaiting_review", "monitoring_ci")
+            | ("awaiting_review", "done")
             | ("monitoring_ci", "repairing")
             | ("monitoring_ci", "ready")
             | ("repairing", "checking")
@@ -672,7 +673,9 @@ pub async fn issue_to_pr_run_checks(
         "failed".to_string()
     };
     run.repair_in_progress = false;
-    if !all_passed {
+    if all_passed {
+        run.error = None;
+    } else {
         run.error = Some(
             "Authoritative owned-worktree checks failed. The bounded repair stage must resolve them before delivery.".to_string(),
         );
@@ -1080,11 +1083,76 @@ mod tests {
             commands,
             vec![
                 ("test".to_string(), "pnpm run test".to_string()),
+                ("lint".to_string(), "pnpm run lint".to_string()),
                 ("build".to_string(), "pnpm run build".to_string()),
             ]
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ci_verdict_uses_real_check_conclusions_and_never_accepts_missing_checks() {
+        let missing = serde_json::json!({"statusCheckRollup":[]});
+        assert_eq!(classify_ci_rollup(&missing).unwrap().0, "pending");
+        let pending = serde_json::json!({"statusCheckRollup":[
+            {"name":"unit","status":"IN_PROGRESS","conclusion":null}
+        ]});
+        assert_eq!(classify_ci_rollup(&pending).unwrap().0, "pending");
+        let failed = serde_json::json!({"statusCheckRollup":[
+            {"name":"test","status":"COMPLETED","conclusion":"FAILURE"},
+            {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}
+        ]});
+        assert_eq!(classify_ci_rollup(&failed).unwrap().0, "failed");
+        let passed = serde_json::json!({"statusCheckRollup":[
+            {"name":"test","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}
+        ]});
+        assert_eq!(classify_ci_rollup(&passed).unwrap().0, "passed");
+        let skipped = serde_json::json!({"statusCheckRollup":[
+            {"name":"disabled","status":"COMPLETED","conclusion":"SKIPPED"}
+        ]});
+        assert_eq!(classify_ci_rollup(&skipped).unwrap().0, "pending");
+    }
+
+    #[test]
+    fn ci_repair_record_survives_storage_restart_without_losing_failure_evidence() {
+        let path = temp_path("ci-restart.json");
+        let mut run = fixture_run("owner/repo", 14, 1_000, "repairing");
+        run.pr_number = Some(8);
+        run.repair_attempts = 1;
+        run.repair_in_progress = true;
+        run.ci_head_oid = Some("a".repeat(40));
+        run.ci_history.push(CiObservation {
+            head_oid: "a".repeat(40),
+            verdict: "failed".to_string(),
+            checks: vec![CiCheckEvidence {
+                name: "CI".to_string(),
+                state: "COMPLETED".to_string(),
+                conclusion: "FAILURE".to_string(),
+                url: None,
+            }],
+            observed_at_ms: 1_000,
+        });
+        let mut store = RunMap::new();
+        store.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &store).unwrap();
+        let recovered = load_runs_from(&path);
+        assert_eq!(recovered.get(&run.run_id), Some(&run));
+        assert_eq!(recovered[&run.run_id].max_repair_attempts, 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn new_ci_transitions_require_evidence_and_explicit_approval_boundary() {
+        assert!(valid_transition("opening_pr", "monitoring_ci"));
+        assert!(valid_transition("monitoring_ci", "repairing"));
+        assert!(valid_transition("repairing", "checking"));
+        assert!(valid_transition("checking", "opening_pr"));
+        assert!(valid_transition("monitoring_ci", "ready"));
+        assert!(valid_transition("ready", "done"));
+        assert!(!valid_transition("repairing", "ready"));
+        assert!(!valid_transition("implementing", "ready"));
     }
 
     #[test]
