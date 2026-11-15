@@ -123,6 +123,11 @@ if (isCompanionOverlay) {
   // coordinator; secondary session windows load this entry point too.
   if (getCurrentWindow().label === "main") {
     startExtensionMarketplaceUpdateCoordinator();
+    // Durable Issue-to-PR CI observations must resume at application boot,
+    // not only when the Issue-to-PR panel is opened by a user.
+    void import("./store/issueToPrStore")
+      .then(({ useIssueToPrStore }) => useIssueToPrStore.getState().init())
+      .catch((error: unknown) => console.error("Issue-to-PR recovery failed", error));
     // Operator-opted independent quality evidence is refreshed whether
     // Settings is open or not. Stale or failed receipts revoke auto-routing.
     // Readers run in the main-window lifecycle but are not a dependency of
