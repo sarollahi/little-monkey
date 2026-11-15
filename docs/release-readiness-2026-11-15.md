@@ -2,6 +2,21 @@
 
 **Decision: NOT RELEASE READY. Do not publish.**
 
+**Actual CI evidence (2026-11-15):** the candidate-package workflow reached
+and built a real unsigned Debian installer but failed after bundling because
+it requested updater signing without a private key; this is addressed by
+disabling signing *only for the test candidate*. The same source run's Rust
+E2E jobs could not find the actual compiled CLI (fixed by prebuilding the
+real CLI), and the canonical URL scan matched a historical fixture and its
+own self-test (exempted explicitly). A first-run or package pass is therefore
+still **not confirmed** for any later commit. The native-Whisper portable
+flags checks failed because their CMake cache files were absent. A forced
+rebuild and fail-closed cache discovery is proposed but not yet verified.
+Finally, the actual RustSec audit reported **13 vulnerabilities**; see
+[the vulnerability remediation register](security-release-blockers-2026-11-15.md).
+The release now requires a passing Rust and npm dependency audit,
+so the outstanding vulnerabilities remain hard blockers.
+
 This report reflects source inspection and unexecuted candidate checks. See
 [the full acceptance matrix](release-acceptance.md). It is not updated
 automatically when workflow definitions are added.
