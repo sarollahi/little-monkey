@@ -2414,10 +2414,15 @@ export function recoverDaemonDesktopTurns(): void {
   }
 
   let retryDelayMs = 2_000;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const retry = () => {
+    if (retryTimer !== null) return;
     const delay = retryDelayMs;
     retryDelayMs = Math.min(30_000, retryDelayMs * 2);
-    setTimeout(discover, delay);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      discover();
+    }, delay);
   };
   const discover = () => {
     void recoverableDesktopTurns().then(({ turns }) => {
