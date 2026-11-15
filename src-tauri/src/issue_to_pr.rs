@@ -623,8 +623,11 @@ pub fn issue_to_pr_advance(
             return Err("Final approval refused: owned draft PR or review identity has changed".to_string());
         }
         let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
+        let (raw_ci, mut checks) = classify_ci_rollup(&rollup)?;
+        checks.sort_by(|a, b| (&a.name, &a.state, &a.conclusion, &a.url)
+            .cmp(&(&b.name, &b.state, &b.conclusion, &b.url)));
         if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid)
-            || classify_ci_rollup(&rollup)?.0 != "passed"
+            || settled_ci_verdict(&raw_ci, head_oid, &checks, run.ci_history.last(), now_ms()?) != "passed"
             || run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0))
         {
             return Err("Final approval refused: authoritative GitHub CI is not green for the current owned head".to_string());
@@ -907,6 +910,30 @@ fn classify_ci_rollup(value: &Value) -> Result<(String, Vec<CiCheckEvidence>), S
     Ok((verdict.to_string(), checks))
 }
 
+/// GitHub registers multiple Actions workflows asynchronously. A single
+/// momentarily green rollup can precede another workflow's first check.
+/// Require unchanged successful contexts for two observations separated by
+/// at least 30 seconds, keeping the first observation durable across restart.
+const CI_GREEN_SETTLE_MS: u64 = 30_000;
+
+fn settled_ci_verdict(
+    raw_verdict: &str,
+    head_oid: &str,
+    checks: &[CiCheckEvidence],
+    previous: Option<&CiObservation>,
+    now: u64,
+) -> String {
+    if raw_verdict != "passed" { return raw_verdict.to_string(); }
+    match previous {
+        Some(last) if last.head_oid == head_oid && last.checks == checks
+            && (last.verdict == "passed"
+                || (last.verdict == "pending"
+                    && now.saturating_sub(last.observed_at_ms) >= CI_GREEN_SETTLE_MS)) =>
+                "passed".to_string(),
+        _ => "pending".to_string(),
+    }
+}
+
 #[tauri::command]
 pub fn issue_to_pr_set_repair_limit(
     app: AppHandle,
@@ -1089,15 +1116,19 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
     if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid) {
         return Err("GitHub CI snapshot is for a stale PR head".to_string());
     }
-    let (mut verdict, checks) = classify_ci_rollup(&rollup)?;
+    let (mut verdict, mut checks) = classify_ci_rollup(&rollup)?;
+    checks.sort_by(|a, b| (&a.name, &a.state, &a.conclusion, &a.url)
+        .cmp(&(&b.name, &b.state, &b.conclusion, &b.url)));
     if verdict == "passed" && (run.review_evidence.is_none() || run.checks.is_empty() || !run.checks.iter().all(|c| c.passed && c.code == Some(0))) {
         verdict = "pending".to_string();
     }
+    let observed_at_ms = now_ms()?;
+    verdict = settled_ci_verdict(&verdict, head_oid, &checks, run.ci_history.last(), observed_at_ms);
     let observation = CiObservation {
         head_oid: head_oid.to_string(),
         verdict: verdict.clone(),
         checks,
-        observed_at_ms: now_ms()?,
+        observed_at_ms,
     };
     // Deduplicate repeated GitHub event deliveries and polls by SHA + verdict + check details.
     let repeated = run.ci_history.last().map(|last|
