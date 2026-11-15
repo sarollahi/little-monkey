@@ -5,7 +5,6 @@
  * All three manifests plus the root Cargo.lock package entry must agree;
  * never reuse the already-published version for a candidate upgrade test.
  */
-import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,12 +30,11 @@ export function nextUnpublishedVersion(source, published) {
   return [biggest[0], biggest[1], biggest[2] + 1].join(".");
 }
 function updateCargoVersion(text, oldVersion, nextVersion) {
-  const section = text.match(/^\[package\][\s\S]*?(?=^\[|\s*$)/m);
-  if (!section || !section[0].includes('version = "' + oldVersion + '"')) {
-    throw new Error("Cargo [package] version differs from the other manifests");
-  }
   const before = /^\[package\]\r?\nname = "little-monkey"\r?\nversion = "[^"]+"/m;
   if (!before.test(text)) throw new Error("Expected Little Monkey Cargo package metadata");
+  if (!text.includes('[package]\nname = "little-monkey"\nversion = "' + oldVersion + '"')) {
+    throw new Error("Cargo [package] version differs from the other manifests");
+  }
   return text.replace(before, '[package]\nname = "little-monkey"\nversion = "' + nextVersion + '"');
 }
 function updateLockVersion(text, oldVersion, nextVersion) {
