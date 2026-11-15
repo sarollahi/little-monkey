@@ -262,11 +262,18 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       void driveRepair(run);
       return;
     }
-    if (run.status === "opening_pr" || run.status === "awaiting_review") {
-      // Waiting on a human action (push+open-PR, or mark-done) in the panel
-      // — nothing to re-drive.
+    if (run.status === "opening_pr") {
+      // If the GitHub write completed but the desktop crashed before the
+      // run record was updated, adopt ONLY the exact owned draft PR. This
+      // reads GitHub and does not trigger a second create/push operation.
+      void api.reconcileIssueToPrPr(run.runId).then(onProgress).catch((error) => {
+        set((state) => ({ activityByRun: {
+          ...state.activityByRun, [run.runId]: "Draft PR reconciliation unavailable: " + errorText(error),
+        } }));
+      });
       return;
     }
+    if (run.status === "awaiting_review") return;
     if (run.status === "checking") {
       const controller = new AbortController();
       controllers.set(run.runId, controller);
