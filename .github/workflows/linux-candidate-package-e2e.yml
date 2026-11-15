@@ -67,6 +67,24 @@ jobs:
           pnpm test:managed-runtime
           pnpm test:install-smoke
 
+      - name: Set a never-published test candidate version above the latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          node --test scripts/ci-candidate-version.test.mjs
+          latest="$(gh release view --json tagName --jq .tagName)"
+          test -n "$latest"
+          node scripts/ci-candidate-version.mjs --latest-published "$latest" \
+            | tee evidence/ephemeral-candidate-version.json
+          # The CLI, bundle and package must agree on this ephemeral version.
+          pnpm test:manifest
+          git diff -- src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json package.json \
+            > evidence/ephemeral-version.patch
+          echo "Only the isolated CI checkout is mutated. Never tag or publish this candidate."
+
       - name: Stage exact verified runtimes and CLI
         run: |
           pnpm stage:whisper
@@ -83,7 +101,13 @@ jobs:
       - name: Build real Debian installer (never upload to a release)
         # A candidate must not require production updater private keys.
         # Disable updater artifacts only for this CI build, not product config.
-        run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles deb --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          pnpm tauri build --target x86_64-unknown-linux-gnu --bundles deb \
+            --config '{"bundle":{"createUpdaterArtifacts":false}}' \
+            2>&1 | tee evidence/candidate-build.log
 
       - name: Collect installer and verified package manifest
         shell: bash
