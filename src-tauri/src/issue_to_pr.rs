@@ -1161,6 +1161,69 @@ mod tests {
         assert!(!valid_transition("implementing", "ready"));
     }
 
+    /// Real Git operations and a real subprocess verification command, with
+    /// deterministic simulated GitHub check responses. No provider or token
+    /// is required for this fixture.
+    #[test]
+    fn real_git_and_simulated_github_failing_ci_repairs_to_final_approval_boundary() {
+        use std::process::Command;
+        let root = temp_path("real-repo-simulated-github");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&root).output().unwrap();
+            assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(root.join("data.txt"), "value=1\n").unwrap();
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "baseline"]);
+        git(&["checkout", "-qb", "issue-to-pr/fixture"]);
+        let initial_oid = git(&["rev-parse", "HEAD"]);
+        let local_check = || Command::new("git")
+            .args(["grep", "-q", "^value=2$", "--", "data.txt"])
+            .current_dir(&root)
+            .status().unwrap().success();
+        assert!(!local_check(), "fixture must start with a real failing repository check");
+        let ci_failed = serde_json::json!({"headRefOid":initial_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"COMPLETED","conclusion":"FAILURE"}]});
+        assert_eq!(classify_ci_rollup(&ci_failed).unwrap().0, "failed");
+        assert!(valid_transition("monitoring_ci", "repairing"));
+
+        // A bounded repair changes only the fixture's declared scope.
+        let attempts = 1u32;
+        assert!(attempts <= MAX_REPAIR_ATTEMPTS);
+        std::fs::write(root.join("data.txt"), "value=2\n").unwrap();
+        assert!(local_check(), "repair must pass a genuine subprocess check");
+        git(&["diff", "--check"]);
+        let changes = git(&["diff", "--name-only"]);
+        assert_eq!(changes, "data.txt", "unrelated changes must be rejected");
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "bounded repair"]);
+        let repaired_oid = git(&["rev-parse", "HEAD"]);
+        assert_ne!(initial_oid, repaired_oid);
+        assert!(valid_transition("repairing", "checking"));
+        assert!(valid_transition("checking", "opening_pr"));
+        let stale = serde_json::json!({"headRefOid":initial_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"COMPLETED","conclusion":"SUCCESS"}]});
+        assert_ne!(stale["headRefOid"].as_str(), Some(repaired_oid.as_str()),
+            "even green checks for the previous commit must not authorize ready");
+        let pending = serde_json::json!({"headRefOid":repaired_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"IN_PROGRESS","conclusion":null}]});
+        assert_eq!(classify_ci_rollup(&pending).unwrap().0, "pending");
+        let green = serde_json::json!({"headRefOid":repaired_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"COMPLETED","conclusion":"SUCCESS"}]});
+        assert_eq!(classify_ci_rollup(&green).unwrap().0, "passed");
+        assert!(local_check());
+        assert!(valid_transition("monitoring_ci", "ready"));
+        // It ends at "ready", NOT "done": human publication approval remains.
+        assert!(!valid_transition("ready", "opening_pr"));
+        assert!(valid_transition("ready", "done"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn detect_check_commands_returns_empty_when_no_package_json() {
         let root = temp_path("no-package-json");
