@@ -13,7 +13,7 @@
     "build:app": "node scripts/build-app.mjs",
     "bundle:check": "node scripts/check-bundle-budget.mjs",
     "build:budget": "pnpm build && pnpm bundle:check",
-    "release:preflight": "pnpm build:budget && pnpm test && pnpm test:machO && pnpm test:manifest && pnpm test:runtime-archive && pnpm test:managed-runtime && pnpm test:wake-assets && pnpm test:mlx-package && pnpm test:mlx-service && pnpm test:mlx-lily-managed",
+    "release:preflight": "pnpm build:budget && pnpm test && pnpm test:machO && pnpm test:manifest && pnpm test:runtime-archive && pnpm test:managed-runtime && pnpm test:wake-assets && pnpm test:mlx-package && pnpm test:mlx-service && pnpm test:mlx-lily-managed && pnpm test:first-run:contract && pnpm test:release-integrity:contract && pnpm test:install-smoke",
     "preview": "vite preview",
     "tauri": "tauri",
     "stage:all": "pnpm stage:runtime && pnpm stage:runtime:tts && pnpm stage:runtime:sd && pnpm stage:whisper && pnpm stage:sherpa-runtime && pnpm stage:wake-word && pnpm stage:cli",
@@ -91,7 +91,10 @@
     "test:swarm-specialists:oracle": "node scripts/swarm-specialist-live-benchmark.mjs --self-check --domain all && node --test scripts/swarm-specialist-oracle.contract.test.mjs",
     "test:swarm-restart:live": "node scripts/swarm-resident-restart-live-acceptance.mjs",
     "test:swarm-repair:live": "node scripts/swarm-repository-repair-live-acceptance.mjs",
-    "test:swarm-repair:oracle": "node scripts/swarm-repository-repair-live-acceptance.mjs --self-check && node --test scripts/swarm-repository-repair-acceptance.contract.test.mjs"
+    "test:swarm-repair:oracle": "node scripts/swarm-repository-repair-live-acceptance.mjs --self-check && node --test scripts/swarm-repository-repair-acceptance.contract.test.mjs",
+    "test:first-run:contract": "node --check scripts/first-run-acceptance.mjs && node --check scripts/first-run-live-e2e.mjs && node --test scripts/first-run-acceptance.contract.test.mjs scripts/first-run-live-e2e.contract.test.mjs",
+    "test:first-run:live": "node scripts/first-run-live-e2e.mjs",
+    "test:release-integrity:contract": "node --check scripts/release-asset-integrity.mjs && node --test scripts/release-asset-integrity.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
