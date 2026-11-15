@@ -3,7 +3,7 @@
  * Simulated CLI used ONLY by the first-run live harness' offline contract test.
  * This is NOT a model, agent, resident daemon, or acceptance performance run.
  */
-import { writeFileSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
@@ -11,6 +11,10 @@ if (args[0] === "--version") {
   console.log("monkey 1.12.0");
 } else if (args[0] === "task" && args[1] === "start") {
   const ws = args[args.indexOf("--workspace") + 1];
+  const math = join(ws, "src/math.mjs");
+  if (existsSync(math)) {
+    writeFileSync(math, readFileSync(math, "utf8").replace("a - b", "a + b"));
+  } else {
   const impl = join(ws, "normalize.mjs");
   writeFileSync(impl,
     readFileSync(impl, "utf8").replace("replaceAll(' ', '-')", "replace(/\\s+/g, '-')"));
