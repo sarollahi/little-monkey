@@ -279,13 +279,40 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           // stale by the time this async resume actually runs.
           const latest = await api.getIssueToPrStatus(run.runId).catch(() => run);
           if (latest.status === "checking") {
-            const checked = await api.runIssueToPrChecks(run.runId);
-            if (checked.status === "repairing") void driveRepair(checked);
+            if (!autonomousIssueRunner) {
+              throw new Error("Independent review coordinator unavailable; refusing unreviewed delivery.");
+            }
+            // Resume the existing tested diff, not the mutating coding turn.
+            const result = await autonomousIssueRunner({
+              runId: latest.runId,
+              agentRunId: latest.runId + "-review-recovery-" + crypto.randomUUID(),
+              repositorySlug: latest.repositorySlug,
+              issueNumber: latest.issueNumber,
+              issueTitle: latest.issueTitle,
+              issueBody: latest.issueBody,
+              issueComments: latest.issueComments,
+              branch: latest.branch,
+              baseRef: latest.baseRef,
+              worktreeId: latest.worktreeId,
+              workspaceLabel: latest.workspaceLabel,
+              resumeReviewOnly: true,
+              signal: controller.signal,
+              onToolActivity: (label) =>
+                set((state) => ({ activityByRun: { ...state.activityByRun, [latest.runId]: label } })),
+            });
+            const after = await api.getIssueToPrStatus(latest.runId);
+            if (after.status === "checking" && result.outcome !== "completed") {
+              await api.advanceIssueToPr(latest.runId,
+                after.repairAttempts < after.maxRepairAttempts ? "repairing" : "failed",
+                { error: result.summary });
+            }
           }
         } catch (error) {
           await api.advanceIssueToPr(run.runId, "failed", { error: errorText(error) }).catch(() => {});
         } finally {
           controllers.delete(run.runId);
+          const after = await api.getIssueToPrStatus(run.runId).catch(() => null);
+          if (after?.status === "repairing") void driveRepair(after);
         }
       })();
       return;
