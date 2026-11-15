@@ -20,6 +20,7 @@ import {
   type DeliveryMutation,
 } from "../../lib/gitDelivery";
 import type { IssueToPrRun, IssueToPrStatus } from "../../lib/issueToPr";
+import { issueToPrWorktreeRevision } from "../../lib/issueToPr";
 import { isTerminalIssueToPrStatus } from "../../lib/issueToPr";
 import { isSpecTooVague, SPEC_DIMENSIONS } from "../../lib/specScorer";
 import { useT } from "../../lib/i18n";
@@ -90,6 +91,9 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
       if (!run.checks.length || run.checks.some((check) => !check.passed || check.code !== 0)) {
         throw new Error("Authoritative repository tests must pass before GitHub delivery.");
       }
+      if (!run.reviewEvidence || run.reviewEvidence.revision !== await issueToPrWorktreeRevision(run.runId)) {
+        throw new Error("The independent review is absent or stale for this owned diff. Reverify before delivery.");
+      }
       const inspection = await inspectOwnedWorktree(run.worktreeId);
       if (inspection.worktree.marker.repositorySlug !== run.repositorySlug
           || inspection.worktree.marker.branch !== run.branch) {
@@ -132,7 +136,8 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
           checksSummary,
           "",
           "## Independent review and limitations",
-          "Review evidence is retained in the autonomous task run ledger. CI checks are observed separately against the exact PR head. Human approval is required before publication. No automatic merge or force-push.",
+          run.reviewEvidence ? "Reviewed changed files: " + run.reviewEvidence.filesReviewed.join(", ") : "No review evidence",
+          "Review evidence is retained in the autonomous task run ledger and tied to the exact tested diff. CI checks are observed against the PR head. Human approval is required before publication. No automatic merge or force-push.",
         ].join("\n");
         const mutation: DeliveryMutation = run.prNumber
           ? { kind: "update_draft_pr", payload: { worktreeId: run.worktreeId, prNumber: run.prNumber, title, body } }
