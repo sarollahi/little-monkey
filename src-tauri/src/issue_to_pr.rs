@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
@@ -305,6 +306,16 @@ fn bounded(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
+}
+
+fn inspection_digest(inspection: &m5_delivery::WorktreeInspection) -> Result<String, String> {
+    if inspection.diffs.staged.truncated || inspection.diffs.unstaged.truncated || inspection.diffs.head.truncated {
+        return Err("Owned diff exceeds verification evidence limits".to_string());
+    }
+    let serialized = serde_json::to_vec(&(
+        &inspection.head_oid, &inspection.files, &inspection.diffs
+    )).map_err(|error| format!("Could not fingerprint owned worktree: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(&serialized)))
 }
 
 fn now_ms() -> Result<u64, String> {
@@ -620,6 +631,7 @@ pub async fn issue_to_pr_run_checks(
 
     let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
     let root = PathBuf::from(&inspection.worktree.marker.canonical_path);
+    let before_digest = inspection_digest(&inspection)?;
     let detected = detect_check_commands(&root)?;
 
     let mut outcomes = Vec::new();
@@ -665,6 +677,19 @@ pub async fn issue_to_pr_run_checks(
                 ),
             });
         }
+    }
+
+    let after_inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    let stable = inspection_digest(&after_inspection).map(|digest| digest == before_digest).unwrap_or(false);
+    if !stable {
+        all_passed = false;
+        outcomes.push(CheckOutcome {
+            label: "workspace revision".to_string(),
+            command: "owned worktree fingerprint".to_string(),
+            passed: false,
+            code: None,
+            output_excerpt: "Workspace changed during verification or evidence was truncated; results are stale.".to_string(),
+        });
     }
 
     let mut runs = load_runs_from(&path);
