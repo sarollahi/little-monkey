@@ -22,6 +22,7 @@ import { AddCustomProviderForm } from "../Settings/AddCustomProviderForm";
 import { ONBOARDING_STEPS, useOnboardingStore } from "../../store/onboardingStore";
 import { useModelStore } from "../../store/modelStore";
 import { useRuntimeHubStore } from "../../store/runtimeHubStore";
+import { firstRunHardwareWarnings } from "../../lib/firstRunHardwareGuidance";
 import { primaryRoot, useWorkspaceStore } from "../../store/workspaceStore";
 import { usePermissionStore, type PermissionMode } from "../../store/permissionStore";
 import {
@@ -158,9 +159,13 @@ function ModelStep() {
   const hardware = useRuntimeHubStore((s) => s.hardware);
   const hardwareError = useRuntimeHubStore((s) => s.errors.overview);
   const refreshHardware = useRuntimeHubStore((s) => s.refreshOverview);
-  const mlxAvailable = Boolean(hardware?.platform.os === "macos"
-    && hardware.platform.arch === "aarch64"
-    && hardware.platform.accelerators.some((gpu) => gpu.kind === "metal" && gpu.available));
+  const warnings = hardware ? firstRunHardwareWarnings({
+    os: hardware.platform.os,
+    arch: hardware.platform.arch,
+    availableRamBytes: hardware.available_ram_bytes,
+    supportedRuntimes: hardware.platform.supported_runtimes,
+    metalAvailable: hardware.platform.accelerators.some((gpu) => gpu.kind === "metal" && gpu.available),
+  }) : [];
 
   useEffect(() => {
     void refreshProviders();
@@ -179,14 +184,9 @@ function ModelStep() {
           <p className="font-semibold text-foreground">Detected hardware: {hardware.platform.os} / {hardware.platform.arch}</p>
           <p>Supported local runtime types reported by this host: {hardware.platform.supported_runtimes.join(", ") || "none detected"}.
             A supported runtime still needs a compatible model and working driver.</p>
-          {!mlxAvailable && (
-            <p className="mt-1 text-warning">MLX is unavailable on this hardware. It requires Apple Silicon with Metal.
-              Use a supported llama.cpp or Ollama model, or configure a cloud provider.</p>
-          )}
-          {hardware.available_ram_bytes < 4 * 1024 ** 3 && (
-            <p className="mt-1 text-warning">Less than 4 GiB of RAM is available. A local model may fail to load;
-              select a smaller model or a cloud provider before starting a coding task.</p>
-          )}
+          {warnings.map((message) => (
+            <p key={message} className="mt-1 text-warning">{message}</p>
+          ))}
         </div>
       ) : hardwareError ? (
         <p role="alert" className="text-xs text-warning">
