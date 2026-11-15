@@ -45,6 +45,7 @@ export interface IssueToPrRun {
   issueNumber: number;
   issueTitle: string;
   issueBody: string;
+  issueComments: string[];
   worktreeId: string;
   branch: string;
   baseRef: string;
