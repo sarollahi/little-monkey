@@ -6403,6 +6403,21 @@ mod tests {
         assert_eq!(body["turns"][0]["run_id"], "run-one");
         assert_eq!(body["turns"][0]["turn_id"], "turn-a");
         assert!(!String::from_utf8_lossy(&response.body).contains("private prompt"));
+        // Session discovery must not bypass a narrower pairing that has
+        // metadata permission but no right to consume the event stream.
+        let (metadata_only, metadata_secret) = pair(
+            "metadata-only", BTreeSet::from(["run-one".into()]),
+            BTreeSet::from([RemoteAction::ViewRuns]),
+            BTreeSet::from([
+                DeviceCapability::ViewRuns, DeviceCapability::ViewSessions,
+            ]),
+        );
+        let metadata_response = api.handle(
+            signed(&metadata_only, &metadata_secret, 1, "metadata-session",
+                   "GET", PATH, b""), 2_000,
+        );
+        assert_eq!(metadata_response.status, 403);
+
         // Even an authenticated device with ViewSessions cannot infer the
         // existence or ID of a run outside its existing run allowlist.
         let (scoped_device, scoped_secret) = pair(
