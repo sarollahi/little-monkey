@@ -29,7 +29,7 @@ import { defaultAutonomousTaskRuntime, startAutonomousTask, type AutonomousTaskR
 import type { AutonomousTask, TaskDeliveryTarget } from './autonomousTask';
 import { resolveTarget } from './targetRouting';
 import { inspectOwnedWorktree } from './gitDelivery';
-import { runIssueToPrChecks } from './issueToPr';
+import { runIssueToPrChecks, advanceIssueToPr } from './issueToPr';
 
 /** Hard cap on model/tool round trips — generous relative to
  * `subagent.ts`'s `MAX_SUBAGENT_ITERATIONS` (15) since a full issue
@@ -149,7 +149,27 @@ export async function runIssueToPrAutonomousTask(
   const started = await startAutonomousTask({ objective: `Implement GitHub issue #${params.issueNumber}: ${params.issueTitle}`, sessionId: params.sessionId ?? null, constraints: { strategy: 'DELEGATE', source: 'issue', untrustedSource: true, allowExternalDelivery: true }, planningContext: { sourceMaterial: [wrapUntrustedContent('GitHub issue requirements', params.issueBody.slice(0, 12_000))] }, deliveryIntent: 'open_or_update_pr', deliveryTarget, runtime, signal: params.signal });
   const result = await started.completion;
   const implementationResult = implementation as IssueToPrAgentResult | null;
-  return { outcome: result.outcome === 'SUCCEEDED' ? 'completed' : result.outcome === 'CANCELLED' ? 'cancelled' : 'error', summary: result.summary ?? 'Issue-to-PR task did not complete.', durableRunId: implementationResult?.durableRunId ?? null, task: result };
+  const verifiedTests = result.verificationEvidence.some((item) =>
+    item.source === 'command' && item.authoritative && item.passed && !item.stale && item.exitCode === 0);
+  const independentReview = result.verificationEvidence.some((item) =>
+    item.source === 'review' && item.authoritative && item.passed && !item.stale && item.exitCode === 0);
+  const planPassed = result.plan?.nodes.some((node) => node.taskClass === 'verification' && node.status === 'succeeded')
+    && result.plan.nodes.some((node) => node.taskClass === 'review' && node.status === 'succeeded');
+  const deliveryApprovalBoundary = result.outcome === 'WAITING_APPROVAL'
+    && verifiedTests && independentReview && Boolean(planPassed);
+  if (deliveryApprovalBoundary) {
+    await advanceIssueToPr(params.runId, 'opening_pr', {
+      durableRunId: implementationResult?.durableRunId ?? result.taskId,
+    });
+  }
+  return {
+    outcome: deliveryApprovalBoundary ? 'completed' : result.outcome === 'CANCELLED' ? 'cancelled' : 'error',
+    summary: deliveryApprovalBoundary
+      ? 'Authoritative local verification and independent review passed; GitHub delivery requires typed approval.'
+      : result.summary ?? 'Issue-to-PR task did not complete.',
+    durableRunId: implementationResult?.durableRunId ?? result.taskId,
+    task: result,
+  };
 }
 
 function buildSystemPrompt(params: RunIssueToPrAgentParams): string {
