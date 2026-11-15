@@ -39,7 +39,7 @@ manufactured execution results.
 | Architecture selection regressions | **NOT YET VERIFIED** | CI runs existing `pnpm test:install-smoke` |
 | Asset SHA-256 regression tests | **NOT YET VERIFIED** | CI runs `node --test scripts/release-asset-integrity.test.mjs` |
 | Frontend typecheck, build, UI tests and native cross-OS tests | **NOT YET VERIFIED ON THIS BRANCH** | Existing CI, check result at exact commit |
-| Linux candidate package build and actual Ubuntu `apt` installation | **NOT YET VERIFIED** | Dedicated CI job builds and installs unsigned candidate; requires completed run |
+| Linux candidate package build and actual Ubuntu `apt` installation | **NOT YET VERIFIED** | Dedicated CI job builds an unsigned candidate and attempts real older→candidate→older apt lifecycle; requires completed run; not the in-app rollback |
 | Clean physical install on advertised OS/architectures | **UNVERIFIED** | CI Ubuntu package installation alone cannot verify the six real end-user targets |
 | Real installed CLI/daemon/model coding task | **UNVERIFIED** | Opt-in self-hosted harness now records terminal run state and raw evidence; no real run submitted |
 | Genuine model coding task with permissions and independent diff review | **UNVERIFIED** | Need exact model/run/driver + raw logs and human permission check |
