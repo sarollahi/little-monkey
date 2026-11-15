@@ -129,6 +129,9 @@ try {
   const baseline = JSON.parse(readFileSync(join(evidenceDir, "baseline.json"), "utf8"));
   summary.proof.baseline = baseline.outcome;
   if (baseline.outcome !== "EXPECTED_BASELINE_FAILURE") throw new Error("The first-run baseline did not fail as expected");
+  if (!/^[a-f0-9]{40}$/.test(baseline.sourceCommit || "")) {
+    throw new Error("First-run baseline did not capture a Git commit");
+  }
   const version = capture("cli-version", monkey, ["--version"]);
   summary.candidate.observedCliVersion = version.trim();
   if (versionOf(version) !== versionOf(expectedVersion) || !versionOf(expectedVersion)) {
@@ -157,7 +160,7 @@ try {
     throw new Error("Daemon recorded " + summary.daemonTerminalStatus + ", not succeeded");
   }
   capture("verify-command", process.execPath, [join(sourceRoot, "scripts/first-run-acceptance.mjs"),
-    "verify", "--workspace", workspace, "--base", "HEAD", "--model", target,
+    "verify", "--workspace", workspace, "--base", baseline.sourceCommit, "--model", target,
     "--runtime", runtime, "--app-version", expectedVersion, "--attempts", "1",
     "--agent-trace", join(evidenceDir, "agent-events.jsonl"),
     "--run-id", summary.runId, "--output", join(evidenceDir, "verification.json")]);
@@ -175,6 +178,19 @@ try {
   }
   process.exitCode = 1;
 } finally {
+  // Even a failed model run must preserve the actual checkout state and
+  // patch before the disposable workspace is removed. These commands are
+  // observations, never evidence of successful verification on their own.
+  try {
+    capture("final-git-status", "git", ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const before = JSON.parse(readFileSync(join(evidenceDir, "baseline.json"), "utf8"));
+    if (/^[a-f0-9]{40}$/.test(before.sourceCommit || "")) {
+      capture("final-git-patch", "git", ["diff", "--no-ext-diff", "--no-color",
+        before.sourceCommit, "--"]);
+    }
+  } catch (error) {
+    summary.finalSourceEvidenceError = String(error);
+  }
   if (taskStartTime !== null && summary.measurable.agentTaskWallMs === null) {
     summary.measurable.agentTaskWallMs = Math.round(performance.now() - taskStartTime);
   }
