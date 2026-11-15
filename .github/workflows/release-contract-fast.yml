@@ -1,0 +1,62 @@
+name: Release contract fast gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-contract-fast.yml"
+      - ".github/workflows/release.yml"
+      - "scripts/**"
+      - "docs/**"
+      - "README.md"
+      - "ROADMAP.md"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/src/m3_runtime_hub.rs"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-contract-fast-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  contract:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: JavaScript parsing and Git prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v git
+          git --version
+          node --check scripts/ci-candidate-version.mjs
+          node --check scripts/first-run-acceptance.mjs
+          node --check scripts/first-run-live-e2e.mjs
+          node --check scripts/autonomous-task-live-eval.mjs
+          node --check scripts/install-smoke.mjs
+          node --check scripts/release-asset-integrity.mjs
+
+      - name: Real Node tests of all offline acceptance and publication contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            scripts/ci-candidate-version.test.mjs \
+            scripts/autonomous-task-live-eval.contract.test.mjs \
+            scripts/first-run-acceptance.contract.test.mjs \
+            scripts/first-run-live-e2e.contract.test.mjs \
+            scripts/lib/installSmoke.test.mjs \
+            scripts/release-asset-integrity.test.mjs \
+            scripts/release-workflow-policy.contract.test.mjs
+
+      - name: Detect stale live owner links without changing historical fixture
+        shell: bash
+        run: node scripts/check-canonical-links.mjs
