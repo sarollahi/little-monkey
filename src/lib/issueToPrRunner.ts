@@ -49,6 +49,9 @@ export interface RunIssueToPrAgentParams {
   issueTitle: string;
   issueBody: string;
   issueComments?: string[];
+  /** Resume only trusted checks/review for a persisted, incomplete checked diff.
+   * Does not rerun a coding agent on crash recovery. */
+  resumeReviewOnly?: boolean;
   branch: string;
   baseRef: string;
   worktreeId?: string;
@@ -128,6 +131,9 @@ export async function runIssueToPrAutonomousTask(
   let implementation: IssueToPrAgentResult | null = null;
   let independentlyReviewed: { revision: string; files: string[]; summary: string } | null = null;
   const issuePolicy = await getIssueToPrStatus(params.runId);
+  if (params.resumeReviewOnly && issuePolicy.status !== 'checking') {
+    throw new Error('Review-only recovery requires an authoritative checking stage.');
+  }
   const resolvedTarget = await resolveTarget();
   const baseRuntime = defaultAutonomousTaskRuntime(resolvedTarget);
   const deliveryTarget: TaskDeliveryTarget = { worktreeId: params.worktreeId ?? params.runId, repositorySlug: params.repositorySlug, branch: params.branch, remote: 'origin', base: params.baseRef, title: `Issue #${params.issueNumber}: ${params.issueTitle}`, body: `Implements GitHub issue #${params.issueNumber}.` };
@@ -153,7 +159,18 @@ export async function runIssueToPrAutonomousTask(
       }
       if (node.taskClass !== 'implementation') return { ok: false, summary: `Unexpected issue implementation node: ${node.taskClass}.` };
       const before = await inspectOwnedWorktree(deliveryTarget.worktreeId);
-      implementation = await runIssueToPrAgent({ ...params, runId: params.runId, signal: context.signal });
+      if (params.resumeReviewOnly) {
+        // The persisted issue owns this exact worktree. Do not replay mutations
+        // from an interrupted agent; rerun local checks and independent review.
+        if (before.worktree.marker.branch !== params.branch
+            || before.worktree.marker.repositorySlug !== params.repositorySlug
+            || !before.files.some((file) => !file.ignored)) {
+          return { ok: false, summary: 'Review recovery requires a matching owned branch with an inspectable changed-file diff.' };
+        }
+        implementation = { outcome: 'completed', summary: 'Reattached to persisted owned diff for independent re-verification.', durableRunId: params.runId };
+      } else {
+        implementation = await runIssueToPrAgent({ ...params, runId: params.runId, signal: context.signal });
+      }
       const after = await inspectOwnedWorktree(deliveryTarget.worktreeId);
       const beforeRevision = await inspectionRevision(before);
       const afterRevision = await inspectionRevision(after);
