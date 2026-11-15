@@ -80,7 +80,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       void (async () => {
         try {
           const latest = await api.getIssueToPrStatus(runId);
-          if (latest.status !== "monitoring_ci") return;
+          if (latest.status !== "monitoring_ci" && latest.status !== "ready") return;
           onProgress(await api.pollIssueToPrCi(runId));
         } catch (error) {
           // A transient GitHub error must not produce a false success.
@@ -164,9 +164,9 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
   const onProgress = (run: IssueToPrRun) => {
     set((state) => ({ runs: upsertRun(state.runs, run) }));
-    if (run.status === "monitoring_ci") scheduleCiPoll(run.runId);
+    if (run.status === "monitoring_ci" || run.status === "ready") scheduleCiPoll(run.runId);
     if (run.status === "repairing" && !controllers.has(run.runId)) void driveRepair(run);
-    if (isTerminalIssueToPrStatus(run.status) || run.status === "ready") {
+    if (isTerminalIssueToPrStatus(run.status)) {
       const timer = monitorTimers.get(run.runId);
       if (timer) clearTimeout(timer);
       monitorTimers.delete(run.runId);
@@ -256,7 +256,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
    * call racing this one can never double-drive the same run. */
   const resumeOrphanedRun = (run: IssueToPrRun): void => {
     if (controllers.has(run.runId) || isTerminalIssueToPrStatus(run.status)) return;
-    if (run.status === "monitoring_ci") {
+    if (run.status === "monitoring_ci" || run.status === "ready") {
       scheduleCiPoll(run.runId, 1_000);
       return;
     }
@@ -264,7 +264,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       void driveRepair(run);
       return;
     }
-    if (run.status === "opening_pr" || run.status === "awaiting_review" || run.status === "ready") {
+    if (run.status === "opening_pr" || run.status === "awaiting_review") {
       // Waiting on a human action (push+open-PR, or mark-done) in the panel
       // — nothing to re-drive.
       return;
