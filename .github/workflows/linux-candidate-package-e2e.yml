@@ -81,7 +81,9 @@ jobs:
           CLI_SIDECAR_TARGET: x86_64-unknown-linux-gnu
 
       - name: Build real Debian installer (never upload to a release)
-        run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles deb
+        # A candidate must not require production updater private keys.
+        # Disable updater artifacts only for this CI build, not product config.
+        run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles deb --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Collect installer and verified package manifest
         shell: bash
