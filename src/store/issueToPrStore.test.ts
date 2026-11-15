@@ -7,6 +7,9 @@ const api = vi.hoisted(() => ({
   cancelIssueToPr: vi.fn(),
   advanceIssueToPr: vi.fn(),
   runIssueToPrChecks: vi.fn(),
+  pollIssueToPrCi: vi.fn(),
+  beginIssueToPrRepair: vi.fn(),
+  setIssueToPrRepairLimit: vi.fn(),
   listenIssueToPrProgress: vi.fn(),
 }));
 
@@ -40,6 +43,11 @@ function fixtureRun(overrides: Partial<IssueToPrRun> = {}): IssueToPrRun {
     prNumber: null,
     prUrl: null,
     checks: [],
+    ciHistory: [],
+    ciHeadOid: null,
+    repairAttempts: 0,
+    maxRepairAttempts: 2,
+    repairInProgress: false,
     error: null,
     durableRunId: null,
     createdAtMs: 1,
@@ -83,6 +91,9 @@ beforeEach(() => {
   api.advanceIssueToPr.mockResolvedValue(fixtureRun());
   api.runIssueToPrChecks.mockResolvedValue(fixtureRun());
   api.getIssueToPrStatus.mockResolvedValue(fixtureRun());
+  api.setIssueToPrRepairLimit.mockImplementation(async () => fixtureRun());
+  api.pollIssueToPrCi.mockResolvedValue(fixtureRun({ status: "monitoring_ci" }));
+  api.beginIssueToPrRepair.mockResolvedValue(fixtureRun({ status: "repairing", repairAttempts: 1, repairInProgress: true }));
   runner.runIssueToPrAgent.mockResolvedValue({
     outcome: "cancelled",
     summary: "Cancelled by the user.",
@@ -217,9 +228,9 @@ describe("issueToPrStore", () => {
   it("markPrOpened and markDone advance the run through the recorded terminal statuses", async () => {
     const run = fixtureRun({ status: "opening_pr" });
     useIssueToPrStore.setState({ runs: [run] });
-    api.advanceIssueToPr.mockResolvedValueOnce({ ...run, status: "awaiting_review", prNumber: 42, prUrl: "https://github.com/owner/repo/pull/42" });
+    api.advanceIssueToPr.mockResolvedValueOnce({ ...run, status: "monitoring_ci", prNumber: 42, prUrl: "https://github.com/owner/repo/pull/42" });
     await useIssueToPrStore.getState().markPrOpened(run.runId, 42, "https://github.com/owner/repo/pull/42");
-    expect(api.advanceIssueToPr).toHaveBeenCalledWith(run.runId, "awaiting_review", { prNumber: 42, prUrl: "https://github.com/owner/repo/pull/42" });
+    expect(api.advanceIssueToPr).toHaveBeenCalledWith(run.runId, "monitoring_ci", { prNumber: 42, prUrl: "https://github.com/owner/repo/pull/42" });
 
     api.advanceIssueToPr.mockResolvedValueOnce({ ...run, status: "done" });
     await useIssueToPrStore.getState().markDone(run.runId);
