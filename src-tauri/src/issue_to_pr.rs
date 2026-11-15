@@ -1468,6 +1468,33 @@ mod tests {
     }
 
     #[test]
+    fn existing_draft_pr_recovery_requires_exact_own_repo_branch_base_and_head() {
+        let run = fixture_run("owner/repo", 42, 100, "opening_pr");
+        let head = "a".repeat(40);
+        let candidate = serde_json::json!({
+            "number": 44, "draft": true, "state": "open",
+            "head": { "ref": run.branch, "sha": head,
+                      "repo": { "full_name": "owner/repo" } },
+            "base": { "ref": "develop", "repo": { "full_name": "owner/repo" } }
+        });
+        assert_eq!(find_matching_owned_draft_pr(&[candidate.clone()], &run, &head).unwrap(),
+            Some((44, "https://github.com/owner/repo/pull/44".to_string())));
+        let mut fork = candidate.clone();
+        fork["head"]["repo"]["full_name"] = serde_json::json!("outsider/repo");
+        assert!(find_matching_owned_draft_pr(&[fork], &run, &head).unwrap().is_none());
+        let mut stale = candidate.clone();
+        stale["head"]["sha"] = serde_json::json!("b".repeat(40));
+        assert!(find_matching_owned_draft_pr(&[stale], &run, &head).unwrap().is_none());
+        let mut published = candidate.clone();
+        published["draft"] = serde_json::json!(false);
+        assert!(find_matching_owned_draft_pr(&[published], &run, &head).unwrap().is_none());
+        let mut wrong_base = candidate.clone();
+        wrong_base["base"]["ref"] = serde_json::json!("main");
+        assert!(find_matching_owned_draft_pr(&[wrong_base], &run, &head).unwrap().is_none());
+        assert!(find_matching_owned_draft_pr(&[candidate.clone(), candidate], &run, &head).is_err());
+    }
+
+    #[test]
     fn ready_requires_stable_matching_green_ci_observations_and_survives_restart() {
         let head = "a".repeat(40);
         let checks = vec![CiCheckEvidence {
