@@ -606,6 +606,17 @@ pub fn issue_to_pr_advance(
     let path = runs_path()?;
     let mut runs = load_runs_from(&path);
     let mut run = require_run(&runs, &run_id)?;
+    if status == "ready" {
+        // Only issue_to_pr_poll_ci may establish readiness after consulting
+        // authoritative GitHub checks for the matching owned PR commit.
+        return Err("Ready is reserved for authoritative GitHub CI verification".to_string());
+    }
+    if !valid_transition(&run.status, &status) {
+        return Err(format!(
+            "Cannot move an issue-to-pr run from '{}' to '{status}'",
+            run.status
+        ));
+    }
     if status == "done" {
         // The final human action must not consume a stale stored "ready".
         // Re-read real GitHub checks and owned head at the approval boundary.
@@ -632,17 +643,6 @@ pub fn issue_to_pr_advance(
         {
             return Err("Final approval refused: authoritative GitHub CI is not green for the current owned head".to_string());
         }
-    }
-    if status == "ready" {
-        // Only issue_to_pr_poll_ci may establish readiness after consulting
-        // authoritative GitHub checks for the matching owned PR commit.
-        return Err("Ready is reserved for authoritative GitHub CI verification".to_string());
-    }
-    if !valid_transition(&run.status, &status) {
-        return Err(format!(
-            "Cannot move an issue-to-pr run from '{}' to '{status}'",
-            run.status
-        ));
     }
     if run.status == "checking" && status == "opening_pr" {
         if run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0)) {
