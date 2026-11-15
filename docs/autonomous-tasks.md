@@ -102,7 +102,22 @@ Failed checks feed a bounded repair through the existing autonomous task
 coordinator; after an independent review and new authoritative local checks,
 the operator must separately approve the new commit/push/update before CI
 is observed again. The default is **two repair attempts**; the operator can
-freeze a 0–5 limit before starting. Persisted attempts and CI evidence survive
+freeze a 0–5 limit before starting. For this workflow the single persisted
+issue counter owns all retries: internal autonomous-task repair retries are
+disabled to prevent violating the configured limit. The operator also freezes
+a **per-agent wall-clock ceiling** (default 30 minutes) and a **total provider-
+reported token ceiling** (default 250,000) across implementation, review, and
+repair. Each model response is charged before tools execute; providers without
+metered token usage fail closed. Token-event idempotency survives app restarts.
+
+Issue titles, descriptions, GitHub issue comments, review threads, and Actions
+logs are marked untrusted. The implementation agent's tools are bound to the
+owned-worktree root; the reviewer uses a read-only tool profile. Local test
+success does not authorize delivery by itself. The reviewer must inspect every
+changed file without changing the workspace, and the backend stores a
+reviewed-diff fingerprint plus covered files. The preview refuses a stale
+review fingerprint. A client cannot self-report `ready`; only GitHub
+observations of the matching owned draft PR head can establish readiness. Persisted attempts and CI evidence survive
 desktop restarts; a repair started before a crash is not counted twice.
 
 The timeline ends at **Ready**, which is a human publication boundary.
@@ -112,6 +127,7 @@ review-thread resolution.
 ### Deterministic acceptance and external prerequisites
 
 ```sh
+node --test scripts/issue-to-pr-ci-acceptance.test.mjs
 cargo test --manifest-path src-tauri/Cargo.toml issue_to_pr --lib
 pnpm test -- src/store/issueToPrStore.test.ts
 pnpm test
@@ -127,9 +143,11 @@ checks, not a real provider, a GitHub API connection, or a real model.
 Live GitHub verification requires the operator's authenticated `gh` account
 and write access to the repo for push/PR mutations; an actual GitHub Actions
 run for the new draft PR is the authoritative remote acceptance test.
-The desktop must be running to continue polling: the Rust run record
-survives a daemon restart, but **unattended CI polling across a completely
-stopped desktop is not yet a daemon service**. Live model-backed CI repair,
+Monitoring starts from the primary desktop's boot lifecycle even if the
+Issue-to-PR panel is never opened. Verified `ready` runs keep being polled and
+are demoted on an owned-worktree/head mismatch. The desktop must be running
+to poll: the Rust run record survives a daemon restart, but **unattended
+CI polling across a completely stopped desktop is not yet a daemon service**. Live model-backed CI repair,
 GitHub event webhook delivery, and a real provider's token/cost budget are
 not covered by the credential-free fixture. Do not claim these passed
 without separate evidence.
