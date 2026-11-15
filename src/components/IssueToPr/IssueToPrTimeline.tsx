@@ -7,7 +7,7 @@ export function issueToPrStages(run: IssueToPrRun): Stage[] {
   const phase = run.status;
   const testsPassed = run.checks.length > 0 && run.checks.every((check) => check.passed && check.code === 0);
   const testsFailed = run.checks.some((check) => !check.passed || check.code !== 0);
-  const reviewed = ["opening_pr", "monitoring_ci", "ready"].includes(phase) || (phase === "done" && run.prNumber !== null && (run.ciHistory?.length ?? 0) > 0);
+  const reviewed = Boolean(run.reviewEvidence && run.reviewEvidence.filesReviewed.length > 0);
   const ci = run.ciHistory?.at(-1);
   const ciVerified = Boolean(ci && ci.verdict === "passed" && ci.headOid === run.ciHeadOid);
   const codingComplete = ["checking", "opening_pr", "awaiting_review", "monitoring_ci", "repairing", "ready", "done"].includes(phase)
@@ -18,7 +18,7 @@ export function issueToPrStages(run: IssueToPrRun): Stage[] {
     { name: "Planning", status: phase === "planning" ? "active" : phase === "failed" && run.checks.length === 0 ? "pending" : "complete", evidence: "Frozen base: " + run.baseRef },
     { name: "Coding", status: phase === "implementing" ? "active" : codingComplete ? "complete" : "pending", evidence: run.branch },
     { name: "Testing", status: testsPassed ? "complete" : testsFailed ? "failed" : phase === "checking" ? "active" : "pending", evidence: run.checks.length ? run.checks.filter((check) => check.passed && check.code === 0).length + "/" + run.checks.length + " checks passed" : "No authoritative local results" },
-    { name: "Review", status: reviewed ? "complete" : phase === "checking" && testsPassed ? "active" : "pending", evidence: reviewed ? "Independent review passed; see run ledger" : "Diff coverage and acceptance review required" },
+    { name: "Review", status: reviewed ? "complete" : phase === "checking" && testsPassed ? "active" : "pending", evidence: reviewed ? run.reviewEvidence!.filesReviewed.length + " files reviewed at revision " + run.reviewEvidence!.revision.slice(0, 12) : "Diff coverage and acceptance review required" },
     { name: "Draft PR", status: run.prNumber ? "complete" : phase === "opening_pr" ? "active" : "pending", evidence: run.prNumber ? "Draft PR #" + run.prNumber : "Requires typed delivery approval" },
     { name: "CI", status: ciVerified ? "complete" : ci?.verdict === "failed" ? "failed" : phase === "monitoring_ci" ? "active" : "pending", evidence: ci ? ci.verdict + " / " + ci.headOid.slice(0, 12) + " / " + ci.checks.length + " checks" : "No verified GitHub checks" },
     { name: "Repair", status: phase === "repairing" ? "active" : run.repairAttempts > 0 && ciVerified ? "complete" : "pending", evidence: run.repairAttempts + " / " + run.maxRepairAttempts + " attempts" },
