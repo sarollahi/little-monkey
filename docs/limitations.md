@@ -1,6 +1,10 @@
 # Limitations
 
-Every capability claim in this repository describes the current `develop` tree.
+Every capability claim in this repository describes the current `develop` tree,
+not necessarily the latest published installer. Release verification is
+separate and tracked in [the release-readiness report](release-readiness-2026-11-15.md).
+A passing fixture or CI contract is not proof that an actual model, GPU,
+permissions dialog, update rollback, or physical installer passed acceptance.
 Where a feature is narrower than its name suggests, the boundary is stated here
 rather than left for a reader to discover. Work that is not built yet lives in
 [ROADMAP.md](../ROADMAP.md).
