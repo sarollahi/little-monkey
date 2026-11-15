@@ -21,6 +21,7 @@ if (args[0] === "--version") {
   const suite = join(ws, "normalize.test.mjs");
   writeFileSync(suite, readFileSync(suite, "utf8") +
     "\ntest('tabs collapse', () => { assert.equal(normalizeUserId('Ada\\tLovelace'), 'ada-lovelace'); });\n");
+  }
   if (process.env.FAKE_UNRELATED === "1") writeFileSync(join(ws, "unrelated.txt"), "unrelated\n");
   console.log(JSON.stringify({run_id: "task-contract-stub", status: "queued"}));
 } else if (args[0] === "task" && args[1] === "attach") {
