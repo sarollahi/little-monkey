@@ -43,18 +43,18 @@ describe("issue-to-PR evidence timeline", () => {
     const stages = issueToPrStages(fixture());
     expect(stages.map((stage) => stage.name)).toEqual(["Issue", "Planning", "Coding", "Testing", "Review", "Draft PR", "CI", "Repair", "Ready"]);
     expect(stages[0].evidence).toBe("owner/repo#42");
-    expect(stages.at(-1)?.status).toBe("pending");
+    expect(stages[stages.length - 1]?.status).toBe("pending");
   });
 
   it("never shows Ready from a model claim or green CI without authoritative local tests", () => {
     const stages = issueToPrStages(fixture({ status: "ready", prNumber: 4, ciHeadOid: greenCI.headOid, ciHistory: [greenCI] }));
-    expect(stages.at(-1)?.status).toBe("pending");
+    expect(stages[stages.length - 1]?.status).toBe("pending");
     expect(stages.find((stage) => stage.name === "Testing")?.status).toBe("pending");
   });
 
   it("rejects a green but stale SHA and pending checks", () => {
     const stale = issueToPrStages(fixture({ status: "ready", prNumber: 4, checks: [successfulCheck], ciHeadOid: "b".repeat(40), ciHistory: [greenCI] }));
-    expect(stale.at(-1)?.status).toBe("pending");
+    expect(stale[stale.length - 1]?.status).toBe("pending");
     expect(stale.find((stage) => stage.name === "CI")?.status).toBe("pending");
   });
 
@@ -62,7 +62,7 @@ describe("issue-to-PR evidence timeline", () => {
     const stages = issueToPrStages(fixture({ status: "repairing", checks: [{ ...successfulCheck, passed: false, code: 1 }], repairAttempts: 1 }));
     expect(stages.find((stage) => stage.name === "Testing")?.status).toBe("failed");
     expect(stages.find((stage) => stage.name === "Repair")?.status).toBe("active");
-    expect(stages.at(-1)?.status).toBe("pending");
+    expect(stages[stages.length - 1]?.status).toBe("pending");
   });
 
   it("reaches Ready only after reviewed delivery, clean local checks, and matching green CI", () => {
@@ -70,6 +70,6 @@ describe("issue-to-PR evidence timeline", () => {
     expect(stages.find((stage) => stage.name === "Testing")?.status).toBe("complete");
     expect(stages.find((stage) => stage.name === "Review")?.status).toBe("complete");
     expect(stages.find((stage) => stage.name === "CI")?.status).toBe("complete");
-    expect(stages.at(-1)?.status).toBe("complete");
+    expect(stages[stages.length - 1]?.status).toBe("complete");
   });
 });
