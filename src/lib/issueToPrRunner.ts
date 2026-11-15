@@ -105,6 +105,12 @@ async function meteredIssueRun(runId: string) {
   }
   return {
     maxWallTimeMs: budget.agentWallTimeMs,
+    beforeModelRequest: async () => {
+      const fresh = await getIssueToPrStatus(runId);
+      if (fresh.tokensUsed >= fresh.totalTokenBudget || fresh.status === 'failed' || fresh.status === 'cancelled') {
+        throw new Error('Frozen issue token budget exhausted or issue run terminated.');
+      }
+    },
     onUsage: (usageId: string, inputTokens: number, outputTokens: number) =>
       chargeIssueToPrTokens(runId, usageId, inputTokens, outputTokens).then(() => undefined),
   };
