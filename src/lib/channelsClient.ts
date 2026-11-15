@@ -355,7 +355,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     kind: "webchat", label: "Web chat", transport: "served", credentialOptional: true,
     credentialLabel: "None \u2014 visitors pair like any other sender",
     whereToGetIt: "A chat page this app serves on the resident daemon\u2019s own TLS listener, at your runner origin under /webchat/<account id>. Configure the remote host first (Settings \u203a Background Agents, or `monkey daemon remote host-configure`); without one there is nothing to serve on. These three routes are unauthenticated, so they do not follow that listener’s bind: a peer that is not loopback is answered 404 until you turn this account’s “Answer non-loopback visitors” on, whatever address the listener holds. With it on, pairing and the route’s own rate limit are the gate. Each browser is minted a visitor identifier the daemon can verify, so one a browser invented is refused rather than opening a conversation. A first-time visitor is answered with a pairing code, exactly like a stranger on any other provider — up to sixteen waiting at once, after which a new visitor’s page stays quiet until you clear the list; approve them with `monkey channels approve`. No files in either direction, and a visitor reads only their own conversation.",
-    docsUrl: "https://github.com/AA-Box/little-monkey/blob/develop/docs/messaging-devices-and-phones.md",
+    docsUrl: "https://github.com/sarollahi/little-monkey/blob/develop/docs/messaging-devices-and-phones.md",
     configFields: [
       { key: "public", label: "Answer non-loopback visitors", type: "boolean", hint: "Off by default. These routes carry no signature, so a peer that is not loopback is refused whatever the remote listener is bound to. Turning this on exposes the page to everyone who can reach that listener, and there is no per-visitor revocation." },
     ],
@@ -369,7 +369,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     credentialLabel: "None here — the extension holds its own credentials in its declared secret slots",
     credentialOptional: true,
     whereToGetIt: "Install a channel extension under Settings > Extensions, grant it the origins it asks for, fill in its secret slots, then name it here.",
-    docsUrl: "https://github.com/AA-Box/little-monkey/blob/develop/docs/executable-extensions.md",
+    docsUrl: "https://github.com/sarollahi/little-monkey/blob/develop/docs/executable-extensions.md",
     configFields: [
       { key: "extension_id", label: "Extension", type: "text", required: true, placeholder: "dev.example.chat", hint: "The installed extension that speaks for this account. Both this and the capability are required: naming only the capability would resolve to whichever extension declares that id today." },
       { key: "capability_id", label: "Channel capability", type: "text", required: true, placeholder: "room", hint: "Which of that extension's declared channel capabilities this account uses." },
