@@ -51,7 +51,7 @@ that's a concern.
 ## Report bugs using GitHub issues
 
 Bugs are tracked through
-[GitHub issues](https://github.com/AA-Box/little-monkey/issues). Open a new one
+[GitHub issues](https://github.com/sarollahi/little-monkey/issues). Open a new one
 and describe what happened.
 
 **Security issues are the exception — do not open a public issue.** Follow
