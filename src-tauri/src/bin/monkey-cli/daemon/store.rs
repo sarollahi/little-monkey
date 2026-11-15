@@ -2707,7 +2707,7 @@ mod tests {
         assert_eq!(index, "ingress_turns_session_attachment_idx");
         let store = DaemonStore { connection };
         let rows = store.recent_ingress_turns_filtered(
-            Some(crate::channels::ingress::ConversationSource::Desktop),
+            Some(little_monkey_lib::channels::ingress::ConversationSource::Desktop),
             Some("session-a"), 10,
         ).unwrap();
         assert_eq!(rows.len(), 1);
