@@ -378,15 +378,17 @@ jobs:
           node scripts/install-smoke.mjs \
             --artifacts artifacts \
             --previous previous \
-            --previous-version "${PREVIOUS_VERSION:-}"
+            --previous-version "${PREVIOUS_VERSION:-}" \
+            --require-clean
 
   # Publishing is what makes the release real: GitHub serves no draft assets,
   # so until this runs `/releases/latest/download/latest.json` 404s and no
   # installed app sees the update. It needs the whole matrix, so a target that
   # failed leaves the release a draft rather than shipping a partial one.
   publish:
-    # Waits on the smoke test too: a release that cannot be installed must not
-    # be published. A skipped leg does not block — it is reported, not fatal.
+    # A platform missing its required clean-install artifact now fails closed.
+    # Skipped optional upgrade or platform-unsupported legs stay visible, not passes.
+    # Physical upgrades, code-signing and rollback still need manual evidence.
     needs: [release, install-smoke, ide-extensions]
     runs-on: ubuntu-22.04
 
