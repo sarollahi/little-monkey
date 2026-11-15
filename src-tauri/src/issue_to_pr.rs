@@ -1225,7 +1225,7 @@ mod tests {
         assert!(valid_transition("implementing", "checking"));
         assert!(valid_transition("checking", "opening_pr"));
         assert!(valid_transition("opening_pr", "awaiting_review"));
-        assert!(valid_transition("awaiting_review", "done"));
+        assert!(!valid_transition("awaiting_review", "done")); // CI verification is mandatory
         assert!(!valid_transition("planning", "checking"));
         assert!(!valid_transition("planning", "opening_pr"));
         assert!(!valid_transition("implementing", "awaiting_review"));
