@@ -1408,6 +1408,41 @@ mod tests {
     }
 
     #[test]
+    fn ready_requires_stable_matching_green_ci_observations_and_survives_restart() {
+        let head = "a".repeat(40);
+        let checks = vec![CiCheckEvidence {
+            name: "frontend".to_string(),
+            state: "COMPLETED".to_string(),
+            conclusion: "SUCCESS".to_string(),
+            url: None,
+        }];
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, None, 1_000), "pending");
+        let first = CiObservation {
+            head_oid: head.clone(),
+            verdict: "pending".to_string(),
+            checks: checks.clone(),
+            observed_at_ms: 1_000,
+        };
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&first), 30_999), "pending");
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&first), 31_000), "passed");
+        let persisted: CiObservation =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&persisted), 31_000), "passed");
+        let mut extra = checks.clone();
+        extra.push(CiCheckEvidence {
+            name: "new delayed job".to_string(),
+            state: "COMPLETED".to_string(),
+            conclusion: "SUCCESS".to_string(),
+            url: None,
+        });
+        assert_eq!(settled_ci_verdict("passed", &head, &extra, Some(&persisted), 31_000), "pending");
+        assert_eq!(settled_ci_verdict("passed", &"b".repeat(40), &checks, Some(&persisted), 31_000), "pending");
+        assert_eq!(settled_ci_verdict("failed", &head, &checks, Some(&persisted), 31_000), "failed");
+        let accepted = CiObservation { verdict: "passed".to_string(), ..persisted };
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&accepted), 31_100), "passed");
+    }
+
+    #[test]
     fn ci_repair_record_survives_storage_restart_without_losing_failure_evidence() {
         let path = temp_path("ci-restart.json");
         let mut run = fixture_run("owner/repo", 14, 1_000, "repairing");
