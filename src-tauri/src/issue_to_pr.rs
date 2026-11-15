@@ -259,7 +259,6 @@ fn valid_transition(from: &str, to: &str) -> bool {
             | ("opening_pr", "awaiting_review")
             | ("opening_pr", "monitoring_ci")
             | ("awaiting_review", "monitoring_ci")
-            | ("awaiting_review", "done")
             | ("monitoring_ci", "repairing")
             | ("monitoring_ci", "ready")
             | ("repairing", "checking")
@@ -1032,7 +1031,14 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
         || inspection.worktree.marker.repository_slug != run.repository_slug
         || inspection.dirty
     {
-        return Err("Worktree ownership changed or local files are dirty; CI evidence is stale".to_string());
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("Owned worktree identity changed or local files are dirty. Reconcile before CI readiness.".to_string());
+        run.updated_at_ms = now_ms()?;
+        runs.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &runs)?;
+        emit_progress(&app, &run);
+        return Ok(run);
     }
     let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
     if pr.get("isDraft").and_then(Value::as_bool) != Some(true)
@@ -1046,14 +1052,21 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
     let head_oid = pr.get("headRefOid").and_then(Value::as_str)
         .ok_or_else(|| "GitHub did not return the draft PR head".to_string())?;
     if inspection.head_oid != head_oid {
-        return Err("Draft PR head differs from the owned local branch; manual reconciliation required".to_string());
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("Draft PR head differs from the owned local branch; manual reconciliation required".to_string());
+        run.updated_at_ms = now_ms()?;
+        runs.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &runs)?;
+        emit_progress(&app, &run);
+        return Ok(run);
     }
     let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
     if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid) {
         return Err("GitHub CI snapshot is for a stale PR head".to_string());
     }
     let (mut verdict, checks) = classify_ci_rollup(&rollup)?;
-    if verdict == "passed" && (run.checks.is_empty() || !run.checks.iter().all(|c| c.passed && c.code == Some(0))) {
+    if verdict == "passed" && (run.review_evidence.is_none() || run.checks.is_empty() || !run.checks.iter().all(|c| c.passed && c.code == Some(0))) {
         verdict = "pending".to_string();
     }
     let observation = CiObservation {
