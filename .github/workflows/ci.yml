@@ -308,8 +308,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
-          cli="$PWD/src-tauri/target/debug/monkey-cli"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then cli="$cli.exe"; fi
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # Git Bash /d/a/... is not a native Win32 path; Windows Rust
+            # std::path needs a drive-qualified path for the daemon child.
+            cli="$(pwd -W)/src-tauri/target/debug/monkey-cli.exe"
+          else
+            cli="$PWD/src-tauri/target/debug/monkey-cli"
+          fi
           test -f "$cli"
           echo "LM_CHANNEL_E2E_CLI=$cli" >> "$GITHUB_ENV"
 
