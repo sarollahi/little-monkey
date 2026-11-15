@@ -2081,6 +2081,8 @@ pub fn run() {
             issue_to_pr::issue_to_pr_poll_ci,
             issue_to_pr::issue_to_pr_begin_repair,
             issue_to_pr::issue_to_pr_set_repair_limit,
+            issue_to_pr::issue_to_pr_set_execution_budget,
+            issue_to_pr::issue_to_pr_charge_tokens,
             approval_chains::approval_chains_list_templates,
             approval_chains::approval_chains_start,
             approval_chains::approval_chain_respond,
