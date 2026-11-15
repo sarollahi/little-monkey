@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from './llamaClient';
 import { toWireMessages } from './llamaClient';
 import type { IngressTurn } from './ingressClient';
-import { durableAssistantIndex, latestRecoverableTurns } from './durableSessionRecovery';
+import { durableAssistantIndex, latestRecoverableTurns, newestTurnPerSession } from './durableSessionRecovery';
 
 const turn = (overrides: Partial<IngressTurn>): IngressTurn => ({
   ingress_id: 'ingress-1', source: 'desktop', source_account_id: 'session-a',
@@ -26,6 +26,18 @@ describe('authoritative session recovery selection', () => {
     ];
     expect(latestRecoverableTurns(turns, new Set(['session-a','session-b']))
       .map(v => v.ingress_id)).toEqual(['other','newer']);
+  });
+
+  it('does not attach a stale run while a newer turn awaits durable admission', () => {
+    const ids = new Set(['session-a']);
+    const turns = [
+      turn({ ingress_id: 'older-running', created_at_ms: 100,
+        run_id: 'old-run', run_state: 'running' }),
+      turn({ ingress_id: 'newly-accepted', created_at_ms: 200,
+        state: 'accepted', run_id: null, job_id: null, run_state: null }),
+    ];
+    expect(newestTurnPerSession(turns, ids)[0].ingress_id).toBe('newly-accepted');
+    expect(latestRecoverableTurns(turns, ids)).toEqual([]);
   });
 
   it('refuses unknown schemas, terminal outcomes, unqueued work and unknown run states', () => {

@@ -676,7 +676,11 @@ export function loadActiveDaemonTurns(): ActiveDaemonDesktopTurn[] {
 }
 
 export function saveActiveDaemonTurn(link: ActiveDaemonDesktopTurn): void {
-  const entries = loadActiveDaemonTurns().filter((entry) => entry.runId !== link.runId);
+  // One local pointer per session; older generations remain readable from
+  // authoritative ingress/RunLedger, never through conflicting cache entries.
+  const entries = loadActiveDaemonTurns().filter(
+    (entry) => entry.runId !== link.runId && entry.sessionId !== link.sessionId,
+  );
   entries.push(link);
   storage()?.setItem(ACTIVE_TURNS_KEY, JSON.stringify(entries));
 }

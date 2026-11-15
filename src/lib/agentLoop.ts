@@ -90,7 +90,7 @@ import { useSettingsStore } from '../store/settingsStore';
 import { useRulesStore } from '../store/rulesStore';
 import { captureConversationMemory } from './conversationAutoMemory';
 import { recoverableDesktopTurns } from './ingressClient';
-import { latestRecoverableTurns, durableAssistantIndex } from './durableSessionRecovery';
+import { latestRecoverableTurns, newestTurnPerSession, durableAssistantIndex } from './durableSessionRecovery';
 import { useCheckpointStore } from '../store/checkpointStore';
 import { usePermissionStore, type PermissionMode } from '../store/permissionStore';
 import { useStackStore, type StackQueryResult } from '../store/stackStore';
@@ -2462,10 +2462,9 @@ export function recoverDaemonDesktopTurns(): void {
       // be recovering it right now; do not attach an older cached run instead
       // and do not submit a duplicate turn in an attempt to "resume" it.
       const awaitingAdmission = new Set(
-        turns.filter((turn) => sessionIds.has(turn.source_account_id)
-          && (turn.source === 'desktop' || turn.source === 'voice')
-          && (turn.state === 'accepted'
-            || (turn.state === 'queued' && turn.run_id === null)))
+        newestTurnPerSession(turns, sessionIds)
+          .filter((turn) => turn.state === 'accepted'
+            || (turn.state === 'queued' && turn.run_id === null))
           .map((turn) => turn.source_account_id),
       );
 

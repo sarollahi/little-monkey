@@ -8,8 +8,9 @@ const WATCHABLE = new Set([
   'paused', 'cancelling', 'needs_reconciliation',
 ]);
 
-/** Unknown schema versions are not reinterpreted using today's tool policy. */
-export function latestRecoverableTurns(
+/** The most recent admitted identity wins, even if it is still accepted and
+ * has no daemon job. An older run must never masquerade as its replacement. */
+export function newestTurnPerSession(
   turns: readonly IngressTurn[],
   sessionIds: ReadonlySet<string>,
 ): IngressTurn[] {
@@ -19,12 +20,23 @@ export function latestRecoverableTurns(
     b.created_at_ms - a.created_at_ms || b.ingress_id.localeCompare(a.ingress_id))) {
     if (!sessionIds.has(turn.source_account_id) || seen.has(turn.source_account_id)) continue;
     if (turn.source !== 'desktop' && turn.source !== 'voice') continue;
-    if (turn.execution_version !== null && turn.execution_version !== 1) continue;
-    if (turn.state !== 'queued' || !turn.run_id || !WATCHABLE.has(turn.run_state ?? '')) continue;
     seen.add(turn.source_account_id);
     result.push(turn);
   }
   return result;
+}
+
+/** Unknown schema versions are not reinterpreted using today's tool policy. */
+export function latestRecoverableTurns(
+  turns: readonly IngressTurn[],
+  sessionIds: ReadonlySet<string>,
+): IngressTurn[] {
+  return newestTurnPerSession(turns, sessionIds).filter((turn) =>
+    (turn.execution_version === null || turn.execution_version === 1) &&
+    turn.state === 'queued' &&
+    turn.run_id !== null &&
+    WATCHABLE.has(turn.run_state ?? ''),
+  );
 }
 
 /** Stable transcript provenance prevents duplicated assistant placeholders.
