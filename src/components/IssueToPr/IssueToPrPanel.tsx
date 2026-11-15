@@ -56,7 +56,7 @@ function errorText(error: unknown): string {
  * mutation. Nothing here bypasses that: both steps require the user to read
  * the preview and type the exact confirmation phrase before anything is
  * written to GitHub. */
-function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number, prUrl: string) => void) {
+function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number, prUrl: string) => Promise<void>) {
   const [preview, setPreview] = useState<ConfirmationPreview | null>(null);
   // The EXACT mutation object `preview` was computed from — `execute`
   // recomputes the digest from whatever mutation it's given and rejects a
@@ -146,9 +146,19 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
       } else {
         const number = result.number ?? run.prNumber;
         const url = result.url ?? run.prUrl;
-        reset();
         if (!number || !url) throw new Error("GitHub did not provide a verifiable draft PR identity.");
-        onOpened(number, url);
+        // The GitHub mutation already happened. Never leave an executable
+        // create/update preview active if persisting its identity fails.
+        try {
+          await onOpened(number, url);
+        } catch (persistError) {
+          setPreview(null);
+          setPendingMutation(null);
+          setConfirmation("");
+          throw new Error("Draft PR exists at " + url + ", but local run tracking failed: " +
+            errorText(persistError) + ". Reconcile the existing PR; do not create another.");
+        }
+        reset();
       }
     } catch (err) {
       setError(errorText(err));
@@ -177,8 +187,9 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
     [store.runs, store.selectedRunId],
   );
 
-  const pr = usePrConfirmFlow(selected, (prNumber, prUrl) => {
-    if (selected) void store.markPrOpened(selected.runId, prNumber, prUrl);
+  const pr = usePrConfirmFlow(selected, async (prNumber, prUrl) => {
+    if (!selected) throw new Error("The issue run is no longer selected.");
+    await store.markPrOpened(selected.runId, prNumber, prUrl);
   });
 
   useEffect(() => {
