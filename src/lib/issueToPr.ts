@@ -58,6 +58,10 @@ export interface IssueToPrRun {
   repairAttempts: number;
   maxRepairAttempts: number;
   repairInProgress: boolean;
+  agentWallTimeMs: number;
+  totalTokenBudget: number;
+  tokensUsed: number;
+  usageEventIds: string[];
   error: string | null;
   durableRunId: string | null;
   createdAtMs: number;
@@ -117,6 +121,12 @@ export const beginIssueToPrRepair = (runId: string) =>
 
 export const setIssueToPrRepairLimit = (runId: string, maxAttempts: number) =>
   invoke<IssueToPrRun>("issue_to_pr_set_repair_limit", { runId, maxAttempts });
+
+export const setIssueToPrExecutionBudget = (runId: string, agentWallTimeMs: number, totalTokenBudget: number) =>
+  invoke<IssueToPrRun>("issue_to_pr_set_execution_budget", { runId, agentWallTimeMs, totalTokenBudget });
+
+export const chargeIssueToPrTokens = (runId: string, usageId: string, inputTokens: number, outputTokens: number) =>
+  invoke<IssueToPrRun>("issue_to_pr_charge_tokens", { runId, usageId, inputTokens, outputTokens });
 
 export function listenIssueToPrProgress(
   onProgress: (run: IssueToPrRun) => void,
