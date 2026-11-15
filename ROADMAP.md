@@ -186,9 +186,14 @@ SBOM in CI; an accessibility audit in CI; and a release penetration test.
 
 These are not features, but they change what shipping the above costs.
 
-- **Two live HTTP servers.** `server.rs` (legacy proxy, ~7.9k lines) and
-  `m3_http_server.rs` (~3.7k) both serve requests. Every route policy change
-  has to be made twice, correctly, or the two disagree.
+- **Two HTTP request adapters remain.** `server.rs` (legacy protocol surface)
+  and `m3_http_server.rs` (M3 compatibility surface) still carry transport
+  logic. `unified_http_server.rs` already owns the endpoint lifecycle,
+  endpoint plan, and shared admission, while `http_route_registry.rs` and
+  `http_policy.rs` supply shared classification/policy machinery. Preserve
+  existing APIs; migrate duplicated route/auth/body policies by contract tests,
+  then remove obsolete transport branches incrementally. See
+  [HTTP migration plan](docs/http-server-migration.md).
 
 The second entry that used to sit here — two live knowledge-index systems —
 is resolved: the v1 `chunks.jsonl`/`vectors.bin` index is deleted and every
