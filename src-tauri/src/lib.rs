@@ -2069,6 +2069,7 @@ pub fn run() {
             m5_delivery::m5_github_pull_request,
             m5_delivery::m5_github_review_threads,
             m5_delivery::m5_github_checks,
+            m5_delivery::m5_github_failed_workflow_logs,
             m5_delivery::m5_review_pull_request,
             m5_delivery::m5_review_reports,
             issue_to_pr::issue_to_pr_start,
