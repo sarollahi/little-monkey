@@ -980,6 +980,23 @@ pub fn m5_github_checks(worktree_id: String, number: u32) -> Result<Value, Strin
 }
 
 #[tauri::command]
+pub fn m5_github_failed_workflow_logs(worktree_id: String, number: u32) -> Result<Value, String> {
+    let store = open_store()?;
+    let record = git::require_worktree(&store, &worktree_id)?;
+    git::validate_live(&store, &record)?;
+    validate_number("pull request", number)?;
+    let pull = github::read_pull_request(&record.marker.repository_slug, number)?;
+    let inspection = git::inspect_worktree(&store, &record)?;
+    if pull.get("isDraft").and_then(Value::as_bool) != Some(true)
+        || pull.get("headRefOid").and_then(Value::as_str) != Some(inspection.head_oid.as_str())
+        || pull.get("headRefName").and_then(Value::as_str) != Some(record.marker.branch.as_str())
+    {
+        return Err("Cannot inspect failure logs for a non-owned or stale PR head".to_string());
+    }
+    github::read_failed_workflow_logs(&record.marker.repository_slug, number)
+}
+
+#[tauri::command]
 pub async fn m5_review_pull_request(
     request: ReviewPullRequestRequest,
 ) -> Result<ReviewReport, String> {
