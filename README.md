@@ -39,7 +39,7 @@ Independently rerun the test before accepting changes
 
 **[Follow the reproducible first-run walkthrough →](docs/first-run.md)**
 
-There is not yet a checked-in recording of a real desktop run. The [recording protocol](docs/adoption.md#publish-a-real-demo-not-a-mockup) explains what must be captured before a video or screenshot can honestly be shown here.
+There is not yet a checked-in recording of a real desktop run. The [recording protocol](docs/adoption.md#publish-a-real-demo-not-a-mockup) explains what must be captured before a video or screenshot can honestly be shown here. The reproducible [baseline and verification recorder](docs/first-run.md#4-capture-independently-verified-acceptance-evidence) stores actual Node output, a scoped Git diff and an explicit list of unverified steps. **A passing fixture is not proof of model or platform readiness.**
 
 ## Why use Little Monkey for repository work?
 
@@ -81,6 +81,15 @@ flowchart LR
 
 Nothing reaches a runtime without passing the middle row. That is the whole design: a tool call, a scheduled recipe and a request from a paired phone are the same kind of thing by the time they arrive.
 
+## Release acceptance status
+
+The [release-readiness audit](docs/release-readiness-2026-11-15.md) and
+[physical acceptance procedure](docs/release-acceptance.md) identify which
+checks must pass before the next release. Development docs are not a claim
+that the latest stable installer passed those checks. Startup/first-token/
+memory/task/cancellation numbers are shown **only** when recorded by an
+actual execution on identified hardware.
+
 ## Install
 
 Take the installer for your platform from the [**latest release**](https://github.com/sarollahi/little-monkey/releases/latest):
@@ -89,7 +98,7 @@ Take the installer for your platform from the [**latest release**](https://githu
 | :-- | :-- | :-- |
 | `.dmg` — Apple Silicon, Intel | `.exe`, `.msi` — x64, arm64 | `.AppImage`, `.deb`, `.rpm` — x86_64, aarch64 |
 
-Bundles ship a pinned, checksum-verified `llama.cpp` runtime and install the `monkey` command on first launch without elevation. Every release carries per-asset signatures, the signing public key and a CycloneDX SBOM. Optional runtimes are listed in **[Setup](docs/setup.md)**.
+Release bundles are designed to ship a pinned, checksum-verified `llama.cpp` runtime and install the `monkey` command on first launch without elevation. v1.12.0 publishes updater signatures, Linux detached signatures, a public key and a CycloneDX SBOM. The signing/trust policy differs by platform; **a digest or generated signature asset alone does not prove OS-level code-signing or a successful physical installation**. Validate the exact downloaded asset using its release metadata and the instructions in [Setup](docs/setup.md). Optional runtimes are listed in **[Setup](docs/setup.md)**.
 
 Release assets also include the versioned IDE clients: `little-monkey-vscode-1.0.0.vsix` for VS Code and `little-monkey-jetbrains-1.0.0.zip` for JetBrains IDEs. Install them from the release page; marketplace publishing is not automatic.
 
