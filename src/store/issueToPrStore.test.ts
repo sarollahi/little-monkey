@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({
   startIssueToPr: vi.fn(),
   getIssueToPrStatus: vi.fn(),
+  reconcileIssueToPrPr: vi.fn(),
   listIssueToPrRuns: vi.fn(),
   cancelIssueToPr: vi.fn(),
   advanceIssueToPr: vi.fn(),
@@ -100,6 +101,7 @@ beforeEach(() => {
   api.advanceIssueToPr.mockResolvedValue(fixtureRun());
   api.runIssueToPrChecks.mockResolvedValue(fixtureRun());
   api.getIssueToPrStatus.mockResolvedValue(fixtureRun());
+  api.reconcileIssueToPrPr.mockImplementation(async () => fixtureRun({ status: "opening_pr" }));
   api.setIssueToPrRepairLimit.mockImplementation(async () => fixtureRun());
   api.setIssueToPrExecutionBudget.mockImplementation(async () => fixtureRun());
   api.pollIssueToPrCi.mockResolvedValue(fixtureRun({ status: "monitoring_ci" }));
