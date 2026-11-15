@@ -200,6 +200,7 @@ jobs:
         # No model is invoked here: this cannot certify agent success.
         run: |
           node --check scripts/first-run-acceptance.mjs
+          node --test scripts/autonomous-task-live-eval.contract.test.mjs
           node --test scripts/first-run-acceptance.contract.test.mjs
           node --check scripts/first-run-live-e2e.mjs
           node --test scripts/first-run-live-e2e.contract.test.mjs
