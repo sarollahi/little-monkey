@@ -336,6 +336,24 @@ impl DaemonStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
+    /// In-flight desktop sessions in the existing admission and job tables.
+    /// Recovery consumes this read model; it never submits, retries, or takes
+    /// over a run. A terminal reconciliation row remains visible to observers.
+    pub fn recoverable_desktop_turns(&self, limit: u32) -> Result<Vec<StoredIngressTurn>, String> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns
+             WHERE source IN ('desktop','voice') AND
+               (state='accepted' OR (state='queued' AND job_id IN
+                 (SELECT job_id FROM daemon_jobs WHERE state IN
+                 ('preparing','queued','running','waiting_approval','paused',
+                  'cancelling','needs_reconciliation'))))
+             ORDER BY created_at_ms DESC, ingress_id DESC LIMIT ?1"
+        )).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([i64::from(limit.clamp(1, 2000))], read_ingress_turn)
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
     /// Recent turns across every origin, newest first. No message text.
     pub fn recent_ingress_turns(&self, limit: u32) -> Result<Vec<StoredIngressTurn>, String> {
         self.recent_ingress_turns_filtered(None, None, limit)
@@ -681,6 +699,20 @@ mod tests {
             RouteTarget::new("chat"),
             NOW,
         )
+    }
+
+    #[test]
+    fn recovery_read_model_includes_only_live_desktop_and_reconciliation() {
+        let mut store = DaemonStore::open_in_memory().unwrap();
+        store.accept_ingress_turn(&ingress(ConversationSource::Desktop,"d1"),&[],NOW).unwrap();
+        store.accept_ingress_turn(&ingress(ConversationSource::Voice,"v1"),&[],NOW+1).unwrap();
+        store.accept_ingress_turn(&ingress(ConversationSource::Mobile,"m1"),&[],NOW+2).unwrap();
+        let turns=store.recoverable_desktop_turns(10).unwrap();
+        assert_eq!(turns.len(),2);
+        assert_eq!(turns[0].source_event_id,"v1");
+        assert_eq!(turns[1].source_event_id,"d1");
+        // This is an observer query: it cannot transition a stored turn.
+        assert_eq!(store.pending_ingress_turns(10).unwrap().len(),3);
     }
 
     #[test]

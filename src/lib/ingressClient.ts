@@ -104,6 +104,11 @@ export const ingressTurns = (
   account: string | null = null,
 ) => invoke<{ turns: IngressTurn[] }>("ingress_turns", { source, account, limit });
 
+/** Incomplete ordinary sessions from the authoritative local daemon store.
+ * Observing these never submits a new model request or acquires a run lease. */
+export const recoverableDesktopTurns = (limit = 2000) =>
+  invoke<{ turns: IngressTurn[] }>("ingress_recoverable_desktop_turns", { limit });
+
 /** One turn, by the identity its origin submitted it under, with its
  * continuations. How a surface watching a turn learns that the run answering
  * the operator is a continuation's rather than the one it submitted. */

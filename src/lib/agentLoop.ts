@@ -88,6 +88,8 @@ import { useTurnStatusStore } from '../store/turnStatusStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { useRulesStore } from '../store/rulesStore';
 import { captureConversationMemory } from './conversationAutoMemory';
+import { recoverableDesktopTurns } from './ingressClient';
+import { latestRecoverableTurns, durableAssistantIndex } from './durableSessionRecovery';
 import { useCheckpointStore } from '../store/checkpointStore';
 import { usePermissionStore, type PermissionMode } from '../store/permissionStore';
 import { useStackStore, type StackQueryResult } from '../store/stackStore';
@@ -1667,6 +1669,11 @@ function recordSkillInvocation(durable: DurableTurnContext, skill: SlashSkill): 
  * buttons call this instead of holding their own AbortController — see
  * `turnControllers`. */
 export function stopTurn(sessionId: string): void {
+  // A recovered client is only an observer. Abort is detach, so an explicit
+  // user Stop must submit a separate daemon control request.
+  const recovered = recoveredObserverRuns.get(sessionId);
+  if (recovered) void daemonCancel(recovered, 'Stopped from attached desktop session')
+    .catch((error) => console.warn('Unable to cancel attached daemon run:', error));
   turnControllers.get(sessionId)?.abort();
 }
 
@@ -1972,6 +1979,7 @@ function daemonProjectionContent(
 async function attachDaemonTurnToChat(
   link: ActiveDaemonDesktopTurn,
   controller: AbortController,
+  observer = false,
 ): Promise<void> {
   let latestContent = link.output || '⏳ Reconnecting to the resident runner…';
   let terminal = false;
@@ -1984,7 +1992,7 @@ async function attachDaemonTurnToChat(
           content: latestContent,
         });
       },
-    });
+    }, !observer);
     terminal = projection.terminal;
     latestContent = daemonProjectionContent(projection);
     useSessionStore.getState().updateMessageAt(link.sessionId, link.assistantIndex, {
@@ -2044,7 +2052,10 @@ async function watchResumedDesktopTurn(
     parentExternalId: resume.parentTurnId,
   });
   const assistantIndex = sessionMessages(sessionId).length;
-  store.addMessage(sessionId, { role: 'assistant', content: '⏳ Continuing the frozen turn…' });
+  store.addMessage(sessionId, {
+    role: 'assistant', content: '⏳ Continuing the frozen turn…',
+    durableTurn: { turnId: resume.parentTurnId, runId: resume.accepted.runId },
+  });
   const link: ActiveDaemonDesktopTurn = {
     sessionId,
     // The continuation's own identity is the backend's; what this link needs is
@@ -2316,7 +2327,10 @@ async function runDaemonAgentTurn(
   }
   if (sourcesNotice) store.addMessage(sessionId, { role: 'system', content: sourcesNotice });
   const assistantIndex = sessionMessages(sessionId).length;
-  store.addMessage(sessionId, { role: 'assistant', content: '⏳ Queued in the resident runner…' });
+  store.addMessage(sessionId, {
+    role: 'assistant', content: '⏳ Queued in the resident runner…',
+    durableTurn: { turnId, runId: queued.run_id },
+  });
   const link: ActiveDaemonDesktopTurn = {
     sessionId,
     turnId,
@@ -2337,28 +2351,77 @@ async function runDaemonAgentTurn(
   maybeAutoPreviewNewestArtifact(sessionId, anchorIndex);
 }
 
-/** Reattaches chat placeholders to nonterminal daemon runs after an app or
- * WebView restart. The durable event sequence is replayed from the exact
- * last committed sequence stored with each link. */
+/** Recovery watches are read-only. Only the daemon controls execution leases,
+ * frozen policy, approvals, process reattachment and mutation reconciliation.
+ * An observer disconnect never sends a cancellation request. */
+const recoveredObserverRuns = new Map<string, string>();
+
+function observeRecoveredDesktopTurn(link: ActiveDaemonDesktopTurn): void {
+  if (turnControllers.has(link.sessionId)) return;
+  if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) return;
+  const controller = new AbortController();
+  turnControllers.set(link.sessionId, controller);
+  recoveredObserverRuns.set(link.sessionId, link.runId);
+  useSessionStore.getState().markTurnRunning(link.sessionId, true);
+  registerDurableController(link.runId, controller, link.sessionId);
+  void attachDaemonTurnToChat(link, controller, true)
+    .catch((error) => console.warn('Durable session observer disconnected:', error))
+    .finally(() => {
+      if (turnControllers.get(link.sessionId) === controller) {
+        turnControllers.delete(link.sessionId);
+        recoveredObserverRuns.delete(link.sessionId);
+        useSessionStore.getState().markTurnRunning(link.sessionId, false);
+      }
+      cancellationDisposers.get(controller)?.forEach((dispose) => dispose());
+      cancellationDisposers.delete(controller);
+      externallyRequestedCancellations.delete(link.runId);
+    });
+}
+
+/** Reattach from the daemon's authoritative ingress+run records, not only from
+ * the old window's localStorage. This also works when a second desktop client
+ * has never seen the first client's local cursor. Discovery does not execute. */
 export function recoverDaemonDesktopTurns(): void {
   for (const link of loadActiveDaemonTurns()) {
-    if (turnControllers.has(link.sessionId)) continue;
     if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) {
       removeActiveDaemonTurn(link.runId);
       continue;
     }
-    const controller = new AbortController();
-    turnControllers.set(link.sessionId, controller);
-    useSessionStore.getState().markTurnRunning(link.sessionId, true);
-    registerDurableController(link.runId, controller, link.sessionId);
-    void attachDaemonTurnToChat(link, controller).finally(() => {
-      turnControllers.delete(link.sessionId);
-      cancellationDisposers.get(controller)?.forEach((dispose) => dispose());
-      cancellationDisposers.delete(controller);
-      externallyRequestedCancellations.delete(link.runId);
-      useSessionStore.getState().markTurnRunning(link.sessionId, false);
-    });
+    observeRecoveredDesktopTurn(link);
   }
+  if (!isTauri()) return;
+  void recoverableDesktopTurns().then(({ turns }) => {
+    const sessions = useSessionStore.getState().sessions;
+    const sessionIds = new Set(sessions.map((session) => session.id));
+    // Newest eligible run per session; filtering on source_account_id makes
+    // editor and paired-device sessions distinct unless explicitly enrolled.
+    for (const turn of latestRecoverableTurns(turns, sessionIds)) {
+      const session = useSessionStore.getState().sessions.find((s) => s.id === turn.source_account_id);
+      if (!session || turnControllers.has(session.id) || !turn.run_id) continue;
+      let assistantIndex = durableAssistantIndex(session.messages, turn.source_event_id, turn.run_id);
+      if (assistantIndex === null) {
+        // The daemon accepted the turn, but the UI died before persisting its
+        // placeholder; create only a display row, never another model turn.
+        assistantIndex = session.messages.length;
+        useSessionStore.getState().addMessage(session.id, {
+          role: 'assistant', content: 'Reconnecting to the resident runner…',
+          durableTurn: { turnId: turn.source_event_id, runId: turn.run_id },
+        });
+      }
+      const link: ActiveDaemonDesktopTurn = {
+        sessionId: session.id,
+        turnId: turn.source_event_id,
+        runId: turn.run_id,
+        jobId: turn.job_id ?? undefined,
+        assistantIndex,
+        lastSequence: 0,
+        output: '',
+        source: turn.source === 'voice' ? 'voice' : 'desktop',
+      };
+      saveActiveDaemonTurn(link);
+      observeRecoveredDesktopTurn(link);
+    }
+  }).catch((error) => console.warn('Authoritative daemon session recovery unavailable:', error));
 }
 
 /** When `artifactAutoPreview` (see `settingsStore.ts`) is on, opens the

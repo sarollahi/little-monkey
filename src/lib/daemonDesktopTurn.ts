@@ -721,6 +721,9 @@ export async function watchDaemonDesktopTurn(
   initialLink: ActiveDaemonDesktopTurn,
   signal: AbortSignal,
   callbacks: WatchDaemonTurnCallbacks,
+  /** A reattached observer must never be able to cancel its daemon by merely
+   * disconnecting. Only a new original turn owns abort-to-cancel semantics. */
+  cancelOnAbort = true,
 ): Promise<DaemonTurnProjection> {
   let link = { ...initialLink };
   let projection = emptyProjection(link);
@@ -733,10 +736,13 @@ export async function watchDaemonDesktopTurn(
     cancelSent = true;
     void daemonCancel(link.runId, "Stopped from desktop chat").catch(() => undefined);
   };
-  signal.addEventListener("abort", requestCancel, { once: true });
-  if (signal.aborted) requestCancel();
+  if (cancelOnAbort) {
+    signal.addEventListener("abort", requestCancel, { once: true });
+    if (signal.aborted) requestCancel();
+  }
   try {
     for (;;) {
+      if (signal.aborted && !cancelOnAbort) return projection;
       const [events, run] = await Promise.all([
         loadRunEvents(link.runId, link.lastSequence, 1_000),
         getRun(link.runId),
@@ -801,7 +807,7 @@ export async function watchDaemonDesktopTurn(
       await wait(POLL_INTERVAL_MS);
     }
   } finally {
-    signal.removeEventListener("abort", requestCancel);
+    if (cancelOnAbort) signal.removeEventListener("abort", requestCancel);
   }
 }
 

@@ -5596,6 +5596,17 @@ pub async fn ingress_turns(source: Option<String>, account: Option<String>, limi
     parse_json(&command(args).await?)
 }
 
+/// Read-only discovery of durable desktop/voice turns from the existing
+/// daemon ingress store. A desktop restart uses this even when localStorage
+/// lost its watcher cursors. The response contains no prompt or credential.
+#[tauri::command]
+pub async fn ingress_recoverable_desktop_turns(limit: u32) -> Result<Value, String> {
+    parse_json(&command(vec![
+        "ingress".into(), "list".into(), "--recoverable".into(),
+        "--limit".into(), limit.clamp(1, 2000).to_string(), "--json".into(),
+    ]).await?)
+}
+
 /// The three arguments that name one turn, validated once.
 ///
 /// The origin is parsed against the enum rather than pattern-checked, so the only
