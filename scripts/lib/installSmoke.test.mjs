@@ -32,8 +32,8 @@ test("each platform picks the installer a hosted runner can actually exercise", 
   // configuration this repo supports.
   assert.equal(installPlanFor("linux", ["app.AppImage"]).kind, "appimage");
 
-  assert.equal(installPlanFor("darwin", ["app_aarch64.dmg"]).kind, "dmg");
-  assert.equal(installPlanFor("win32", ["app_1.2.0_x64-setup.exe"]).kind, "nsis");
+  assert.equal(installPlanFor("darwin", ["app_aarch64.dmg"], "arm64").kind, "dmg");
+  assert.equal(installPlanFor("win32", ["app_1.2.0_x64-setup.exe"], "x64").kind, "nsis");
 
   // The MSI is deliberately not used — it needs elevation — so an MSI-only set
   // has no plan, which the caller turns into a SKIPPED with a reason.
