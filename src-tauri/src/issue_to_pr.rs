@@ -40,17 +40,23 @@ const MAX_RUNS: usize = 500;
 const MAX_ISSUE_URL_LEN: usize = 2_048;
 const BRANCH_PREFIX: &str = "issue-to-pr/";
 const CHECK_OUTPUT_CAP: usize = 4_096;
+const CI_HISTORY_CAP: usize = 64;
+const MAX_REPAIR_ATTEMPTS: u32 = 2;
+fn default_max_repair_attempts() -> u32 { MAX_REPAIR_ATTEMPTS }
 const DEFAULT_PROTECTED_BRANCHES: [&str; 3] = ["main", "master", "develop"];
 
 fn default_base_ref() -> String {
     "HEAD".to_string()
 }
-const VALID_STATUSES: [&str; 8] = [
+const VALID_STATUSES: [&str; 11] = [
     "planning",
     "implementing",
     "checking",
     "opening_pr",
     "awaiting_review",
+    "monitoring_ci",
+    "repairing",
+    "ready",
     "done",
     "failed",
     "cancelled",
@@ -64,6 +70,24 @@ pub struct CheckOutcome {
     pub passed: bool,
     pub code: Option<i32>,
     pub output_excerpt: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CiCheckEvidence {
+    pub name: String,
+    pub state: String,
+    pub conclusion: String,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CiObservation {
+    pub head_oid: String,
+    pub verdict: String,
+    pub checks: Vec<CiCheckEvidence>,
+    pub observed_at_ms: u64,
 }
 
 /// One issue-to-PR run. Persisted whole (not event-sourced) at
@@ -101,6 +125,18 @@ pub struct IssueToPrRun {
     pub pr_url: Option<String>,
     #[serde(default)]
     pub checks: Vec<CheckOutcome>,
+    /// Authoritative GitHub check snapshots, versioned by exact PR head SHA.
+    #[serde(default)]
+    pub ci_history: Vec<CiObservation>,
+    #[serde(default)]
+    pub ci_head_oid: Option<String>,
+    #[serde(default)]
+    pub repair_attempts: u32,
+    #[serde(default = "default_max_repair_attempts")]
+    pub max_repair_attempts: u32,
+    /// Prevent a resumed desktop from consuming the same repair attempt twice.
+    #[serde(default)]
+    pub repair_in_progress: bool,
     #[serde(default)]
     pub error: Option<String>,
     /// Run Capsule ledger id for the headless agent turn, once the frontend
@@ -192,7 +228,13 @@ fn valid_transition(from: &str, to: &str) -> bool {
             | ("implementing", "checking")
             | ("checking", "opening_pr")
             | ("opening_pr", "awaiting_review")
-            | ("awaiting_review", "done")
+            | ("opening_pr", "monitoring_ci")
+            | ("awaiting_review", "monitoring_ci")
+            | ("monitoring_ci", "repairing")
+            | ("monitoring_ci", "ready")
+            | ("repairing", "checking")
+            | ("checking", "repairing")
+            | ("ready", "done")
     )
 }
 
@@ -433,6 +475,11 @@ pub async fn issue_to_pr_start(
         pr_number: None,
         pr_url: None,
         checks: Vec::new(),
+        ci_history: Vec::new(),
+        ci_head_oid: None,
+        repair_attempts: 0,
+        max_repair_attempts: MAX_REPAIR_ATTEMPTS,
+        repair_in_progress: false,
         error: None,
         durable_run_id: None,
         created_at_ms: now,
@@ -572,12 +619,13 @@ pub async fn issue_to_pr_run_checks(
     let mut outcomes = Vec::new();
     let mut all_passed = true;
     if detected.is_empty() {
+        all_passed = false;
         outcomes.push(CheckOutcome {
             label: "no scripts detected".to_string(),
             command: String::new(),
-            passed: true,
+            passed: false,
             code: None,
-            output_excerpt: "No test/build script was found in this repository's package.json."
+            output_excerpt: "No test/build scripts detected. Configure authoritative repository checks before delivery."
                 .to_string(),
         });
     } else {
@@ -618,12 +666,15 @@ pub async fn issue_to_pr_run_checks(
     run.checks = outcomes;
     run.status = if all_passed {
         "opening_pr".to_string()
+    } else if run.repair_attempts < run.max_repair_attempts {
+        "repairing".to_string()
     } else {
         "failed".to_string()
     };
+    run.repair_in_progress = false;
     if !all_passed {
         run.error = Some(
-            "One or more checks failed in the owned worktree. Fix them (or push and open the draft PR manually from the Git delivery panel) before retrying.".to_string(),
+            "Authoritative owned-worktree checks failed. The bounded repair stage must resolve them before delivery.".to_string(),
         );
     }
     run.updated_at_ms = now_ms()?;
