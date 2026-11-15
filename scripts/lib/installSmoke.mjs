@@ -29,8 +29,22 @@ export const OUTCOME = Object.freeze({
  * — the caller turns that into a SKIPPED with the reason attached, rather than
  * quietly doing nothing.
  */
-export function installPlanFor(platform, assets) {
-  const named = (suffix) => assets.find((asset) => asset.toLowerCase().endsWith(suffix));
+export function installPlanFor(platform, assets, arch = process.arch) {
+  // All six release targets share one release page. Never extract or execute
+  // an arm64 installer on an x64 runner (or vice versa) just because it sorts
+  // first in the downloaded asset list.
+  if (arch !== "arm64" && arch !== "x64") return null;
+  const assetArch = (name) => {
+    const matches = [...name.toLowerCase().matchAll(/(?:^|[._-])(aarch64|arm64|x86_64|amd64|x64)(?=[._-]|$)/g)];
+    const found = new Set(matches.map((match) =>
+      match[1] === "aarch64" || match[1] === "arm64" ? "arm64" : "x64",
+    ));
+    return found.size === 0 ? null : found.size === 1 ? [...found][0] : "mixed";
+  };
+  const named = (suffix) => assets.find((asset) =>
+    asset.toLowerCase().endsWith(suffix) &&
+    (assetArch(asset) === null || assetArch(asset) === arch),
+  );
 
   if (platform === "linux") {
     // `.deb` first: `dpkg-deb -x` unpacks the real package payload with no root
@@ -223,6 +237,6 @@ export function formatLeg(name, { outcome, reason }) {
  * A skip does not fail the release. It is *reported*, which is the difference
  * between "we know this is not covered here" and "we think this is covered".
  */
-export function exitCodeFor(legs) {
+export function exitCodeFor(legs, { requireClean = false } = {}) {
   return legs.some((leg) => leg.outcome === OUTCOME.Fail) ? 1 : 0;
 }
