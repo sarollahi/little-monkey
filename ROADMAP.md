@@ -161,8 +161,7 @@ the requested split.
 
 **Today:** the in-app updater ships on all three desktop platforms — background
 checks, a staged bundle, a relaunch card, and Windows deferring its installer to
-the click so an update cannot kill a turn mid-flight — and releases publish
-themselves once every matrix target has uploaded. Settings → Updates & integrity
+the click so an update cannot kill a turn mid-flight — and release publishing is now an explicitly approved manual workflow, not an automatic push to `main`. Settings → Updates & integrity
 adds the manual half: a check-now control, the last check and its failure if it
 failed, and a per-platform rollback that snapshots the install before an update
 replaces it and restores it with a detached script. A Linux install that is not
