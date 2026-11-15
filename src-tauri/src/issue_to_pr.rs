@@ -606,6 +606,30 @@ pub fn issue_to_pr_advance(
     let path = runs_path()?;
     let mut runs = load_runs_from(&path);
     let mut run = require_run(&runs, &run_id)?;
+    if status == "done" {
+        // The final human action must not consume a stale stored "ready".
+        // Re-read real GitHub checks and owned head at the approval boundary.
+        let number = run.pr_number.ok_or_else(|| "Missing owned draft PR".to_string())?;
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
+        let head_oid = pr.get("headRefOid").and_then(Value::as_str)
+            .ok_or_else(|| "GitHub did not return the current PR head".to_string())?;
+        if inspection.dirty || inspection.head_oid != head_oid
+            || run.ci_head_oid.as_deref() != Some(head_oid)
+            || pr.get("isDraft").and_then(Value::as_bool) != Some(true)
+            || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
+            || run.review_evidence.is_none()
+        {
+            return Err("Final approval refused: owned draft PR or review identity has changed".to_string());
+        }
+        let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
+        if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid)
+            || classify_ci_rollup(&rollup)?.0 != "passed"
+            || run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0))
+        {
+            return Err("Final approval refused: authoritative GitHub CI is not green for the current owned head".to_string());
+        }
+    }
     if status == "ready" {
         // Only issue_to_pr_poll_ci may establish readiness after consulting
         // authoritative GitHub checks for the matching owned PR commit.
