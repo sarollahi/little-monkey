@@ -122,3 +122,16 @@ when they know a desktop session ID.
 
 This API does not add mobile-side transcript editing or new turn submission
 into arbitrary desktop sessions; it supplies authenticated observation only.
+
+## Lost local transcript before the first save
+
+If the daemon accepted an ordinary desktop/voice turn but the desktop crashed
+before persisting its local session entry, the **primary window** reconstructs
+a minimal read-only session shell from the already-accepted ingress identity.
+The original prompt, model settings, workspace grant, persona and conversation
+history are **not** guessed or pulled from current configuration. It attaches
+to the authoritative run and displays output/events. The shell has
+`recoveryOnly: true` and refuses *new* turns because doing otherwise would
+silently continue under a different security/context snapshot. The operator
+must start a new session for further instructions. This is a conservative
+partial recovery, not complete reconstruction of lost unsaved UI state.

@@ -24,6 +24,7 @@
  * same mechanism a manual model switch uses — no separate sticky field.
  */
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { allowedToolsRestriction, applyAllowedToolsRestriction } from './allowedTools';
 import { textContent } from './llamaClient';
 import type { ChatContentPart, ChatMessage, ToolCall, ToolDef } from './llamaClient';
@@ -1732,6 +1733,14 @@ export async function runAgentTurn(
   if (turnControllers.has(sessionId)) {
     throw new Error('A turn is already running in this session.');
   }
+  if (useSessionStore.getState().sessions.some(
+    (session) => session.id === sessionId && session.recoveryOnly
+  )) {
+    throw new Error(
+      'This session was recovered without its original transcript or frozen context. ' +
+      'Its existing daemon run can be observed, but new instructions require a new session.'
+    );
+  }
   const controller = new AbortController();
   const turnId = turnIdOverride ?? crypto.randomUUID();
   if (signal) {
@@ -2426,6 +2435,17 @@ export function recoverDaemonDesktopTurns(): void {
   };
   const discover = () => {
     void recoverableDesktopTurns().then(({ turns }) => {
+      // A desktop may crash after accepting ingress but before flushing its
+      // first transcript save. Recreate only a read-only display shell and
+      // only in the primary window; never infer lost user instructions.
+      if (getCurrentWindow().label === 'main') {
+        for (const turn of turns) {
+          if ((turn.source === 'desktop' || turn.source === 'voice') &&
+              !useSessionStore.getState().sessions.some((s) => s.id === turn.source_account_id)) {
+            useSessionStore.getState().recoverMissingDaemonSession(turn.source_account_id);
+          }
+        }
+      }
       const sessions = useSessionStore.getState().sessions;
       const sessionIds = new Set(sessions.map((session) => session.id));
       // An accepted turn without a job ID is already durable. The daemon may

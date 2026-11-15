@@ -56,6 +56,10 @@ export interface ChatSession {
   id: string;
   title: string;
   messages: ChatMessage[];
+  /** True only if daemon admission survived but the original desktop
+   * transcript was never persisted. This is an observation shell, not a
+   * runnable reconstruction of unknown prompts or permission policy. */
+  recoveryOnly?: boolean;
   createdAt: number;
   updatedAt: number;
   /** Shown pinned to the top of the sidebar, above "Recents". */
@@ -445,6 +449,10 @@ export interface SessionStore {
    * hasn't been sent to yet, replaces it rather than creating another one
    * alongside it — see the implementation for why. */
   newSession: () => void;
+  /** Create a read-only view for a real accepted daemon session whose
+   * local transcript was lost at crash time. Never reconstructs a prompt,
+   * workspace grant or model choice from current settings. */
+  recoverMissingDaemonSession: (sessionId: string) => boolean;
   /** Make `id` the active session (no-op if it doesn't exist). Clears the
    * target's `unread` flag, mirroring "opening it marks it read". */
   switchSession: (id: string) => void;
@@ -1455,6 +1463,7 @@ function normalizeSession(raw: Partial<ChatSession>, interruptRunning: boolean):
     id: raw.id as string,
     title: raw.title as string,
     messages,
+    recoveryOnly: raw.recoveryOnly === true,
     createdAt: raw.createdAt as number,
     updatedAt: raw.updatedAt as number,
     pinned: raw.pinned ?? false,
@@ -1944,6 +1953,30 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       delete runningVerifyLabel[sessionId];
       return { runningVerifyLabel };
     });
+  },
+
+  recoverMissingDaemonSession: (sessionId) => {
+    // This id came from accepted ingress, not from provider output. Reject
+    // malformed/massive ids before they enter the persisted session index.
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(sessionId)) return false;
+    if (get().sessions.some((session) => session.id === sessionId)) return true;
+    const shell: ChatSession = {
+      ...createSession(),
+      id: sessionId,
+      title: 'Recovered agent session',
+      recoveryOnly: true,
+      workspacePath: null,
+      modelTarget: null,
+      personaId: null,
+      unread: true,
+    };
+    set((state) => {
+      if (state.sessions.some((session) => session.id === sessionId)) return state;
+      const sessions = [...state.sessions, shell];
+      persist(sessions, state.activeSessionId, state.groups);
+      return { sessions };
+    });
+    return true;
   },
 
   newSession: () => {
