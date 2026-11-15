@@ -28,6 +28,21 @@ only with disposable test workspaces and identities.
 
 ## Available execution paths
 
+The real CI run for commit `440a1969` on November 15, 2026 found
+failing source-level acceptance checks (canonical link scan, Rust daemon
+CLI location), a candidate Debian bundle signing failure, and 13 current
+RustSec vulnerabilities. Later commits address the first three findings,
+but **the updated workflows must complete successfully before accepting
+these fixes**. The vulnerability register and required upgrade work are
+in [Security blockers](security-release-blockers-2026-11-15.md).
+
+The Linux candidate workflow now uses a **next-patch, unpublished test
+version** across Tauri, Cargo, lockfile and the CLI, so its selected older
+installer can be the actual latest published release. This version exists
+only inside the disposable runner. It is neither a production tag nor an
+app-signed updater artifact.
+
+
 - [Linux candidate installer E2E](../.github/workflows/linux-candidate-package-e2e.yml)
   builds a real unsigned x64 `.deb` on a temporary Ubuntu runner, checks
   runtime manifests, runs installer payload and CLI smoke checks, downloads
