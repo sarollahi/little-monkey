@@ -76,6 +76,10 @@ export interface RunHeadlessAgentParams {
    * text-only model to guess at pixels. */
   requireVision?: boolean;
   maxIterations: number;
+  /** Optional wall clock ceiling; aborts in-flight model and tools. */
+  maxWallTimeMs?: number;
+  /** Durable usage accounting before a model can execute tool calls. */
+  onUsage?: (usageId: string, inputTokens: number, outputTokens: number) => Promise<void>;
   /** Defaults to `code`; use `explore` for analysis-only agents so mutating
    * tools are absent from both the model schema and durable workspace policy. */
   toolProfile?: 'explore' | 'code';
@@ -141,7 +145,12 @@ function workspaceRootViolation(toolCall: ToolCall, requiredRoot: string | undef
  * path alongside the normal outcome handling.
  */
 export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<HeadlessAgentResult> {
-  const { runId, signal } = params;
+  const { runId } = params;
+  const budgetController = new AbortController();
+  const budgetTimer = params.maxWallTimeMs && params.maxWallTimeMs > 0
+    ? setTimeout(() => budgetController.abort("Agent wall-time budget exhausted"), params.maxWallTimeMs)
+    : null;
+  const signal = budgetTimer ? AbortSignal.any([params.signal, budgetController.signal]) : params.signal;
   let recorder: DurableRunRecorder | null = null;
   const evidence: HeadlessAgentEvidence = {
     executedTools: [],
@@ -202,7 +211,7 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
       : null;
 
     for (let iteration = 0; iteration < params.maxIterations; iteration++) {
-      if (signal.aborted) return finish('cancelled', CANCELLED_SUMMARY);
+      if (signal.aborted) return finish(budgetController.signal.aborted ? 'error' : 'cancelled', budgetController.signal.aborted ? 'Agent wall-time budget exhausted.' : CANCELLED_SUMMARY);
 
       const wireHistory: ChatMessage[] = [
         { role: 'system', content: params.systemPrompt },
@@ -211,10 +220,19 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
       const attempt = await attemptStream(target, wireHistory, tools, signal, effort, runId);
 
       if (attempt.usage) {
-        recorder?.recordUsage(attempt.usage.promptTokens, attempt.usage.completionTokens);
-        evidence.promptTokens += attempt.usage.promptTokens;
-        evidence.completionTokens += attempt.usage.completionTokens;
+        const inputTokens = attempt.usage.promptTokens;
+        const outputTokens = attempt.usage.completionTokens;
+        if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens) || inputTokens < 0 || outputTokens < 0) {
+          return finish('error', 'Invalid provider token usage; cannot enforce frozen budget.');
+        }
+        if (params.onUsage) await params.onUsage(`${runId}-${iteration}`, inputTokens, outputTokens);
+        recorder?.recordUsage(inputTokens, outputTokens);
+        evidence.promptTokens += inputTokens;
+        evidence.completionTokens += outputTokens;
+      } else if (params.onUsage) {
+        return finish('error', 'Provider supplied no token usage; cannot enforce frozen budget.');
       }
+      if (budgetController.signal.aborted) return finish('error', 'Agent wall-time budget exhausted.');
       if (attempt.streamError !== null) return finish('error', attempt.streamError);
 
       if (attempt.toolCalls.length === 0) {
@@ -292,7 +310,7 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
         ];
       }
 
-      if (signal.aborted) return finish('cancelled', CANCELLED_SUMMARY);
+      if (signal.aborted) return finish(budgetController.signal.aborted ? 'error' : 'cancelled', budgetController.signal.aborted ? 'Agent wall-time budget exhausted.' : CANCELLED_SUMMARY);
     }
 
     return finish(
@@ -301,5 +319,7 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
     );
   } catch (error) {
     return finish('error', errorMessage(error));
+  } finally {
+    if (budgetTimer) clearTimeout(budgetTimer);
   }
 }
