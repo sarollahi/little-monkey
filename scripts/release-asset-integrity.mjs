@@ -7,7 +7,8 @@
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { argv, exitCode } from "node:process";
+import { argv } from "node:process";
+import { pathToFileURL } from "node:url";
 
 const option = (name) => {
   const i = argv.indexOf(name);
@@ -67,6 +68,6 @@ async function main() {
   }
   if (!report.passed) process.exitCode = 1;
 }
-if (argv[1] && import.meta.url === new URL("file://" + resolve(argv[1])).href) {
+if (argv[1] && import.meta.url === pathToFileURL(resolve(argv[1])).href) {
   main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }
