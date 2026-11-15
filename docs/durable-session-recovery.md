@@ -168,3 +168,23 @@ prioritized in the bounded recovery page, so recent completed runs cannot
 evict active runs simply by having a newer timestamp. The bounded seven-day
 window is a *discovery* policy, not permission to erase immutable ledger
 events. Older completed runs require explicit run/session lookup.
+
+## Reproducible acceptance
+
+Run `pnpm test:durable-sessions` from the repository root after installing
+frontend dependencies and the Rust/native toolchain. To isolate a build gate,
+use `pnpm test:durable-sessions --frontend-only` or `--rust-only`. The command
+fails on the first real error and writes structured evidence to
+`test-results/durable-session-acceptance.json` (ignored by Git). Each check
+records the exact command, exit code, elapsed time, platform, architecture and
+Git SHA. Linux also exercises adoption of a live OS worker across a daemon
+replacement. These tests use fixtures, not paid models or external mutations.
+
+This **does not substitute for live fault injection** on an actual installed
+host: test a daemon process crash before and after a model stream, before and
+after an approval, between preparation and confirmation of an external
+operation, with two desktop windows, after an app restart, and from a
+separately paired device. Compare the per-run event cursor, original run id,
+workspace diffs and mutation confirmation ledger before concluding that a
+production scenario survived. The command cannot certify those unexecuted
+host-level scenarios.

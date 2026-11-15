@@ -74,3 +74,6 @@ packaging/mlx/dist
 packaging/mlx/mlx-runtime-*.tar.gz
 packaging/mlx/mlx-catalog.json
 packaging/mlx/service/__pycache__
+
+# Reproducible recovery acceptance evidence (local, generated)
+test-results/durable-session-acceptance.json
