@@ -156,7 +156,9 @@ test("only a real failure fails the release", () => {
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Skip }]), 0);
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Skip }, { outcome: OUTCOME.Skip }]), 0);
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Fail }]), 1);
-  assert.equal(exitCodeFor([{ outcome: OUTCOME.Skip }], { requireClean: true }), 1);
-  assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Skip }], { requireClean: true }), 0);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Skip }], { requireClean: true }), 1);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Pass }, { name: "upgrade", outcome: OUTCOME.Skip }], { requireClean: true }), 0);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Pass }, { name: "upgrade", outcome: OUTCOME.Skip }], { requireUpgrade: true }), 1);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Pass }, { name: "upgrade", outcome: OUTCOME.Pass }], { requireClean: true, requireUpgrade: true }), 0);
   assert.equal(exitCodeFor([], { requireClean: true }), 1);
 });
