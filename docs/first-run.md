@@ -43,12 +43,12 @@ Alternatively, if the installed release supports daemon-backed autonomous tasks,
 
 ## 4. Capture independently verified acceptance evidence
 
-After an agent has changed the two example files, run this from the repository root; replace the example labels with the **exact observed** model, runtime, app version, and attempt count:
+After an agent has changed the two example files, run this from the repository root; replace the example labels with the **exact observed** model, runtime, app version, and attempt count. `BASELINE_COMMIT_SHA` is the `sourceCommit` from the baseline JSON, not necessarily your current HEAD (agents may commit their work):
 
 ```sh
 node scripts/first-run-acceptance.mjs verify \
   --workspace examples/first-run \
-  --base HEAD \
+  --base BASELINE_COMMIT_SHA \
   --model "YOUR_EXACT_MODEL_ID" \
   --runtime "YOUR_ACTUAL_RUNTIME_AND_VERSION" \
   --app-version "YOUR_INSTALLED_APP_VERSION" \
@@ -60,7 +60,45 @@ The tool captures the real Node test output, independent whitespace probes, exac
 
 If model or daemon commands fail, record the full error and do not claim a successful attempt. Preserve the original recording and raw evidence outside the disposable checkout. If you retry, use a fresh clone and a fresh evidence filename; the script refuses to overwrite reports. Check `Settings → Runtime Hub → Overview` for an unsupported/absent driver, incompatible architecture, missing Metal, or insufficient RAM; check `Settings → Background Agents` if a daemon task never starts. A provider requiring a network connection or API credentials is not an offline setup.
 
-## 5. What this proves — and what it does not
+## 5. Run the full installed CLI → daemon → real model → Git oracle
+
+On an operator-controlled **Linux acceptance machine**, with the actual
+Little Monkey release/candidate installed, CLI and resident daemon working,
+and a model configured (with any required credentials), run:
+
+```sh
+pnpm test:first-run:live -- \
+  --target "ollama:YOUR_EXACT_INSTALLED_MODEL" \
+  --runtime "ollama VERSION / model DIGEST" \
+  --app-version "EXACT_INSTALLED_APP_VERSION" \
+  --timeout-seconds 900 \
+  --evidence-dir "$HOME/lm-acceptance-$(date +%Y%m%d-%H%M%S)"
+```
+
+This copies the deliberately broken fixture into a new Git repository, records
+the actual failing baseline and its commit SHA, obtains the **installed CLI's**
+version, submits `monkey task start`, follows its actual JSONL event stream,
+checks `monkey task status` for the **authoritative terminal `succeeded`**
+state, and calls the independent verification oracle against the original
+commit. It preserves the real stdout/stderr from every CLI command, the
+post-run Git patch, result JSON, attempts and the measured task wall time.
+If the run errors or times out, it requests cancellation of only its own
+run and records the failure. Other timings remain null until measured.
+
+This is a **real-model** workflow, never used in default hosted CI. It can
+also be launched with the manually triggered
+[First-run real-model acceptance](../.github/workflows/first-run-live-e2e.yml)
+workflow, but only after a compatible, authenticated self-hosted runner is
+provisioned. The workflow stores raw traces on that runner; only the summary
+is uploaded by default. Check the trace for sensitive values before sharing.
+Neither result alone proves GUI permission prompts, package signatures or
+other hardware configurations.
+
+Offline CI also runs a **simulated CLI contract** to test that this harness
+rejects a failed daemon status and unrelated edits; that contract is never
+reported as real-model evidence.
+
+## 6. What this proves — and what it does not
 
 A passing attempt demonstrates one bounded coding task on one configured machine and model. It does not prove autonomous recovery, universal security, superior benchmark quality, or any success rate across other tasks. The [limitations](limitations.md) and [live acceptance instructions](autonomous-tasks.md) distinguish these claims.
 
