@@ -76,7 +76,7 @@ describe('runIssueToPrAgent', () => {
       issueTitle: 'Fix', issueBody: 'Check', branch: 'codex/issue-42',
       baseRef: 'develop', workspaceLabel: 'issue-42-worktree', signal,
     });
-    const params = runHeadlessAgent.mock.calls.at(-1)?.[0] as {
+    const params = runHeadlessAgent.mock.calls[runHeadlessAgent.mock.calls.length - 1]?.[0] as {
       onUsage: (id: string, input: number, output: number) => Promise<void>;
     };
     await params.onUsage('run-1-0', 123, 45);
