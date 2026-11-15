@@ -21,9 +21,7 @@ const CI_POLL_MS = 30_000;
 let unlisten: (() => void) | null = null;
 let initialization: Promise<void> | null = null;
 const runIssueToPrAgent = issueToPrRunner.runIssueToPrAgent;
-const autonomousIssueRunner = "runIssueToPrAutonomousTask" in issueToPrRunner
-  ? issueToPrRunner.runIssueToPrAutonomousTask
-  : null;
+const autonomousIssueRunner = () => issueToPrRunner.runIssueToPrAutonomousTask ?? null;
 
 /** Test-only: clears in-flight run controllers. This module's `controllers`
  * map is process-lifetime by design (see the comment above it), which means
@@ -118,7 +116,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           failedActionsLogs: logs?.headRefOid === lastCi?.headOid ? logs?.logs : null,
           reviewThreads,
         }).slice(0, 12_000);
-        const result = await (autonomousIssueRunner ?? runIssueToPrAgent)({
+        const result = await (autonomousIssueRunner() ?? runIssueToPrAgent)({
           runId: current.runId,
           // New provider calls after a crash must not reuse old token event IDs.
           agentRunId: current.runId + "-repair-" + current.repairAttempts + "-" + crypto.randomUUID(),
@@ -194,7 +192,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
     controllers.set(run.runId, controller);
     try {
       await api.advanceIssueToPr(run.runId, "implementing");
-      const result = await (autonomousIssueRunner ?? runIssueToPrAgent)({
+      const result = await (autonomousIssueRunner() ?? runIssueToPrAgent)({
         runId: run.runId,
         agentRunId: run.runId + "-implementation-" + crypto.randomUUID(),
         repositorySlug: run.repositorySlug,
@@ -279,11 +277,12 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           // stale by the time this async resume actually runs.
           const latest = await api.getIssueToPrStatus(run.runId).catch(() => run);
           if (latest.status === "checking") {
-            if (!autonomousIssueRunner) {
+            const coordinator = autonomousIssueRunner();
+            if (!coordinator) {
               throw new Error("Independent review coordinator unavailable; refusing unreviewed delivery.");
             }
             // Resume the existing tested diff, not the mutating coding turn.
-            const result = await autonomousIssueRunner({
+            const result = await coordinator({
               runId: latest.runId,
               agentRunId: latest.runId + "-review-recovery-" + crypto.randomUUID(),
               repositorySlug: latest.repositorySlug,
