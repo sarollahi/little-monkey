@@ -13,7 +13,7 @@
     "build:app": "node scripts/build-app.mjs",
     "bundle:check": "node scripts/check-bundle-budget.mjs",
     "build:budget": "pnpm build && pnpm bundle:check",
-    "release:preflight": "pnpm build:budget && pnpm test && pnpm test:machO && pnpm test:manifest && pnpm test:runtime-archive && pnpm test:managed-runtime && pnpm test:wake-assets && pnpm test:mlx-package && pnpm test:mlx-service && pnpm test:mlx-lily-managed && pnpm test:first-run:contract && pnpm test:release-integrity:contract && pnpm test:install-smoke",
+    "release:preflight": "pnpm build:budget && pnpm test && pnpm test:machO && pnpm test:manifest && pnpm test:runtime-archive && pnpm test:managed-runtime && pnpm test:wake-assets && pnpm test:mlx-package && pnpm test:mlx-service && pnpm test:mlx-lily-managed && pnpm test:first-run:contract && pnpm test:release-integrity:contract && pnpm test:install-smoke && pnpm test:release-policy:contract",
     "preview": "vite preview",
     "tauri": "tauri",
     "stage:all": "pnpm stage:runtime && pnpm stage:runtime:tts && pnpm stage:runtime:sd && pnpm stage:whisper && pnpm stage:sherpa-runtime && pnpm stage:wake-word && pnpm stage:cli",
@@ -94,7 +94,8 @@
     "test:swarm-repair:oracle": "node scripts/swarm-repository-repair-live-acceptance.mjs --self-check && node --test scripts/swarm-repository-repair-acceptance.contract.test.mjs",
     "test:first-run:contract": "node --check scripts/first-run-acceptance.mjs && node --check scripts/first-run-live-e2e.mjs && node --test scripts/first-run-acceptance.contract.test.mjs scripts/first-run-live-e2e.contract.test.mjs",
     "test:first-run:live": "node scripts/first-run-live-e2e.mjs",
-    "test:release-integrity:contract": "node --check scripts/release-asset-integrity.mjs && node --test scripts/release-asset-integrity.test.mjs"
+    "test:release-integrity:contract": "node --check scripts/release-asset-integrity.mjs && node --test scripts/release-asset-integrity.test.mjs",
+    "test:release-policy:contract": "node --test scripts/release-workflow-policy.contract.test.mjs && node scripts/check-canonical-links.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
