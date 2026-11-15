@@ -44,6 +44,8 @@ const CHECK_OUTPUT_CAP: usize = 4_096;
 const CI_HISTORY_CAP: usize = 64;
 const MAX_REPAIR_ATTEMPTS: u32 = 2;
 fn default_max_repair_attempts() -> u32 { MAX_REPAIR_ATTEMPTS }
+fn default_agent_wall_time_ms() -> u64 { 30 * 60_000 }
+fn default_total_token_budget() -> u64 { 250_000 }
 const DEFAULT_PROTECTED_BRANCHES: [&str; 3] = ["main", "master", "develop"];
 
 fn default_base_ref() -> String {
@@ -138,6 +140,17 @@ pub struct IssueToPrRun {
     /// Prevent a resumed desktop from consuming the same repair attempt twice.
     #[serde(default)]
     pub repair_in_progress: bool,
+    /// Per-agent-turn wall time ceiling; persisted and frozen before execution.
+    #[serde(default = "default_agent_wall_time_ms")]
+    pub agent_wall_time_ms: u64,
+    /// Total observed model tokens across implementation, independent review and repairs.
+    #[serde(default = "default_total_token_budget")]
+    pub total_token_budget: u64,
+    #[serde(default)]
+    pub tokens_used: u64,
+    /// Idempotency for replayed model usage events after a crash or retry.
+    #[serde(default)]
+    pub usage_event_ids: Vec<String>,
     #[serde(default)]
     pub error: Option<String>,
     /// Run Capsule ledger id for the headless agent turn, once the frontend
@@ -492,6 +505,10 @@ pub async fn issue_to_pr_start(
         repair_attempts: 0,
         max_repair_attempts: MAX_REPAIR_ATTEMPTS,
         repair_in_progress: false,
+        agent_wall_time_ms: default_agent_wall_time_ms(),
+        total_token_budget: default_total_token_budget(),
+        tokens_used: 0,
+        usage_event_ids: Vec::new(),
         error: None,
         durable_run_id: None,
         created_at_ms: now,
@@ -807,6 +824,87 @@ pub fn issue_to_pr_set_repair_limit(
     Ok(run)
 }
 
+/// Execution policy is immutable once the run leaves planning.
+#[tauri::command]
+pub fn issue_to_pr_set_execution_budget(
+    app: AppHandle,
+    run_id: String,
+    agent_wall_time_ms: u64,
+    total_token_budget: u64,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    if !(60_000..=2 * 60 * 60_000).contains(&agent_wall_time_ms) {
+        return Err("Per-agent wall budget must be between 1 and 120 minutes".to_string());
+    }
+    if !(10_000..=2_000_000).contains(&total_token_budget) {
+        return Err("Total token budget must be between 10000 and 2000000".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path);
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "planning" || run.tokens_used > 0 || run.repair_attempts > 0 {
+        return Err("Agent budgets are frozen once execution has started".to_string());
+    }
+    run.agent_wall_time_ms = agent_wall_time_ms;
+    run.total_token_budget = total_token_budget;
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// Charge actual provider-reported token usage immediately after a model
+/// response, before permitting any subsequent tool execution. The run-id +
+/// iteration key is replay-safe across desktop restarts. No model claim can
+/// reset a token budget or grant additional attempts.
+#[tauri::command]
+pub fn issue_to_pr_charge_tokens(
+    app: AppHandle,
+    run_id: String,
+    usage_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    m5_delivery::validate_id("usage id", &usage_id)?;
+    if input_tokens > 10_000_000 || output_tokens > 10_000_000 {
+        return Err("Unreasonable token accounting event rejected".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path);
+    let mut run = require_run(&runs, &run_id)?;
+    if run.usage_event_ids.iter().any(|id| id == &usage_id) {
+        return Ok(run);
+    }
+    if is_terminal(&run.status) || !matches!(run.status.as_str(), "implementing" | "checking" | "repairing") {
+        return Err("Cannot charge model tokens outside an active issue execution stage".to_string());
+    }
+    let increment = input_tokens.checked_add(output_tokens)
+        .ok_or_else(|| "Token accounting overflow".to_string())?;
+    run.tokens_used = run.tokens_used.checked_add(increment)
+        .ok_or_else(|| "Token budget overflow".to_string())?;
+    run.usage_event_ids.push(usage_id);
+    if run.usage_event_ids.len() > 4_096 {
+        // Fail closed rather than forgetting idempotency IDs and recharging a
+        // replayed event from the same long-lived run.
+        run.status = "failed".to_string();
+        run.error = Some("Maximum token-accounting event count reached".to_string());
+    }
+    if run.tokens_used > run.total_token_budget {
+        run.status = "failed".to_string();
+        run.error = Some("Frozen total model token budget exhausted".to_string());
+    }
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    if run.status == "failed" {
+        return Err(run.error.clone().unwrap_or_else(|| "Token accounting failed".to_string()));
+    }
+    Ok(run)
+}
+
 /// A repair attempt has an idempotent start marker. After a process crash the
 /// same attempt resumes without consuming an additional budget unit.
 #[tauri::command]
@@ -981,6 +1079,10 @@ mod tests {
             repair_attempts: 0,
             max_repair_attempts: MAX_REPAIR_ATTEMPTS,
             repair_in_progress: false,
+            agent_wall_time_ms: default_agent_wall_time_ms(),
+            total_token_budget: default_total_token_budget(),
+            tokens_used: 0,
+            usage_event_ids: Vec::new(),
             error: None,
             durable_run_id: None,
             created_at_ms,
