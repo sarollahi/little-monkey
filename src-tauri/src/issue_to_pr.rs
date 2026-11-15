@@ -93,6 +93,15 @@ pub struct CiObservation {
     pub observed_at_ms: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewEvidence {
+    pub revision: String,
+    pub files_reviewed: Vec<String>,
+    pub summary: String,
+    pub observed_at_ms: u64,
+}
+
 /// One issue-to-PR run. Persisted whole (not event-sourced) at
 /// `<app_data>/issue_to_pr_runs.json`, keyed by `run_id` — the state machine
 /// itself is small and linear enough that a whole-record rewrite on every
@@ -131,6 +140,9 @@ pub struct IssueToPrRun {
     pub pr_url: Option<String>,
     #[serde(default)]
     pub checks: Vec<CheckOutcome>,
+    /// Independent reviewer evidence tied to the exact tested owned diff.
+    #[serde(default)]
+    pub review_evidence: Option<ReviewEvidence>,
     /// Authoritative GitHub check snapshots, versioned by exact PR head SHA.
     #[serde(default)]
     pub ci_history: Vec<CiObservation>,
@@ -509,6 +521,7 @@ pub async fn issue_to_pr_start(
         pr_number: None,
         pr_url: None,
         checks: Vec::new(),
+        review_evidence: None,
         ci_history: Vec::new(),
         ci_head_oid: None,
         repair_attempts: 0,
@@ -605,10 +618,16 @@ pub fn issue_to_pr_advance(
             run.status
         ));
     }
-    if run.status == "checking" && status == "opening_pr"
-        && (run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0)))
-    {
-        return Err("Cannot authorize PR delivery without successful repository checks".to_string());
+    if run.status == "checking" && status == "opening_pr" {
+        if run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0)) {
+            return Err("Cannot authorize PR delivery without successful repository checks".to_string());
+        }
+        let evidence = run.review_evidence.as_ref()
+            .ok_or_else(|| "Cannot deliver without independent revision-bound review evidence".to_string())?;
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        if evidence.revision != inspection_digest(&inspection)? {
+            return Err("Owned diff changed since the independent review".to_string());
+        }
     }
     run.status = status;
     if let Some(error) = error {
@@ -726,6 +745,7 @@ pub async fn issue_to_pr_run_checks(
     let mut runs = load_runs_from(&path);
     let mut run = require_run(&runs, &run_id)?;
     run.checks = outcomes;
+    run.review_evidence = None; // New verification invalidates any prior diff review.
     run.status = if all_passed {
         // Do not expose Git delivery before the independent diff review finishes.
         "checking".to_string()
@@ -742,6 +762,61 @@ pub async fn issue_to_pr_run_checks(
             "Authoritative owned-worktree checks failed. The bounded repair stage must resolve them before delivery.".to_string(),
         );
     }
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// Read only: stable revision fingerprint from the existing owned worktree.
+#[tauri::command]
+pub fn issue_to_pr_worktree_revision(run_id: String) -> Result<String, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let run = require_run(&load_runs_from(&runs_path()?), &run_id)?;
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id)?;
+    inspection_digest(&inspection)
+}
+
+/// Persist actual independent review coverage against a stable tested diff.
+/// The client does not get to mark a review successful by changing status.
+#[tauri::command]
+pub fn issue_to_pr_record_review(
+    app: AppHandle,
+    run_id: String,
+    revision: String,
+    files_reviewed: Vec<String>,
+    summary: String,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    if revision.len() != 64 || !revision.bytes().all(|c| c.is_ascii_hexdigit())
+        || files_reviewed.is_empty() || files_reviewed.len() > 512
+    {
+        return Err("Invalid independent review revision or file coverage".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path);
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "checking" || run.checks.is_empty()
+        || !run.checks.iter().all(|check| check.passed && check.code == Some(0))
+    {
+        return Err("An independent review requires successful authoritative local checks".to_string());
+    }
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    if inspection_digest(&inspection)? != revision {
+        return Err("Independent review evidence does not match the current owned diff".to_string());
+    }
+    let changed: Vec<&str> = inspection.files.iter().filter(|file| !file.ignored)
+        .map(|file| file.path.as_str()).collect();
+    if changed.is_empty() || changed.iter().any(|path| !files_reviewed.iter().any(|reviewed| reviewed == path)) {
+        return Err("Independent review did not cover every changed file".to_string());
+    }
+    run.review_evidence = Some(ReviewEvidence {
+        revision,
+        files_reviewed,
+        summary: bounded(&summary, 4_000),
+        observed_at_ms: now_ms()?,
+    });
     run.updated_at_ms = now_ms()?;
     runs.insert(run.run_id.clone(), run.clone());
     save_runs_to(&path, &runs)?;
@@ -1084,6 +1159,7 @@ mod tests {
             pr_number: None,
             pr_url: None,
             checks: Vec::new(),
+            review_evidence: None,
             ci_history: Vec::new(),
             ci_head_oid: None,
             repair_attempts: 0,
