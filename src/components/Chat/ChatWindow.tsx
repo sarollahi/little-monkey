@@ -382,6 +382,9 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
     setInputState(value);
   }, []);
   const sending = useSessionStore(selectTurnRunning(sessionId));
+  const recoveryOnly = useSessionStore(state =>
+    state.sessions.some(session => session.id === sessionId && session.recoveryOnly === true)
+  );
   const sessionCollaborationEnabled=useSettingsStore((state)=>state.sessionCollaborationEnabled);
   // Read persisted SQLite inbox rows while this chat is idle and visible.
   // The mailbox NEVER starts an autonomous model execution.
@@ -1144,6 +1147,9 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
   }, [appendCommandNotice, availableSkills, onOpenPmCopilot, onOpenSettingsTab, sessionId]);
 
   const handleSend = useCallback(async () => {
+    // The original instructions and security context are missing. An observer
+    // may display the existing run, never submit a new turn into this shell.
+    if (recoveryOnly) return;
     let settledInput = input;
     if (dictationButtonRef.current?.isActive()) {
       try {
@@ -1249,7 +1255,7 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
       ultracodeMode,
       { input: settledInput, attachments: pendingAttachments, pastedPlacements: settledPlacements },
     );
-  }, [input, sending, startingComparison, startingCrew, ultracodeMode, attachments, pastedPlacements, crewId, compareTargets, resizeTextarea, sendTurn, sessionId, prepareTurnInstructions, executeBuiltIn, appendCommandNotice, localModelStarting, setInput]);
+  }, [input, sending, startingComparison, startingCrew, ultracodeMode, attachments, pastedPlacements, crewId, compareTargets, resizeTextarea, sendTurn, sessionId, prepareTurnInstructions, executeBuiltIn, appendCommandNotice, localModelStarting, setInput, recoveryOnly]);
 
   const handleStop = useCallback(() => {
     stopTurn(sessionId);
@@ -1656,7 +1662,7 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
         sessionId={sessionId}
         messages={messages}
         onEditUserMessage={handleEditMessage}
-        editingDisabled={sending}
+        editingDisabled={sending || recoveryOnly}
         onRetry={handleRetry}
         onStartSideTask={handleStartSideTask}
         onEditGeneratedImage={handleEditGeneratedImage}
@@ -1682,6 +1688,16 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
                 ? repairingService ? t("ChatWindow.repairingService") : t("ChatWindow.repairServiceButton")
                 : t("ChatWindow.retryButton")}
             </button>
+          </div>
+        </div>
+      )}
+
+      {recoveryOnly && (
+        <div className="mx-4 mb-2" role="status">
+          <div className="mx-auto max-w-3xl rounded-lg border border-warning bg-warning-soft px-3 py-2 text-sm text-warning">
+            Recovered read-only session. The original unsaved instructions and
+            security context are unavailable. You can inspect the existing
+            durable run, but new requests must start in a new session.
           </div>
         </div>
       )}
@@ -1953,7 +1969,7 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
                   onScroll={syncCommandOverlayScroll}
                   placeholder={t("ChatWindow.inputPlaceholder")}
                   rows={1}
-                  disabled={preparingTurn || startingComparison || startingCrew}
+                  disabled={preparingTurn || startingComparison || startingCrew || recoveryOnly}
                   data-focus-ring="custom"
                   className={`block max-h-40 min-h-[1.75rem] w-full resize-none bg-transparent py-1 text-sm leading-relaxed outline-none placeholder:text-faint ${
                     commandSegments ? "text-transparent caret-foreground" : "text-foreground"
@@ -1984,7 +2000,7 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
                 onChange={setInput}
                 textareaRef={textareaRef}
                 resizeTextarea={resizeTextarea}
-                disabled={sending || preparingTurn || startingComparison || startingCrew}
+                disabled={sending || preparingTurn || startingComparison || startingCrew || recoveryOnly}
               />
               <span className="group/action relative shrink-0">
                 {/* One slot, four jobs: end Talk while a voice conversation is
@@ -1996,7 +2012,7 @@ export default function ChatWindow({ sessionId, onManagePrompts, onOpenSettingsT
                 <button
                   type="button"
                   onClick={talkActive ? stopTalk : sending ? handleStop : showTalkButton ? startTalk : handleSend}
-                  disabled={!talkActive && (preparingTurn || startingComparison || startingCrew || localModelStarting || (!sending && !showTalkButton && !input.trim() && !hasPastedTextDraft))}
+                  disabled={!talkActive && ((!sending && recoveryOnly) || preparingTurn || startingComparison || startingCrew || localModelStarting || (!sending && !showTalkButton && !input.trim() && !hasPastedTextDraft))}
                   aria-label={talkActive
                     ? t("ChatWindow.talkStopAriaLabel")
                     : sending
