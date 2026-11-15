@@ -138,6 +138,10 @@ export async function runIssueToPrAutonomousTask(
     // primary workspace, which would bypass the frozen issue token budget
     // and may draft scopes outside this owned worktree.
     plan: undefined,
+    // The Issue-to-PR state machine and its typed m5_delivery confirmations
+    // alone own commit/push/draft PR. Do not create a second coordinator
+    // approval request which cannot be resumed by the issue panel.
+    deliver: async () => ({ ok: true, summary: 'Verified issue worktree is ready for the existing typed Git delivery flow.' }),
     executeNode: async (task, node, context) => {
       if (node.taskClass === 'investigation') {
         const inspection = await inspectOwnedWorktree(deliveryTarget.worktreeId);
@@ -191,7 +195,7 @@ export async function runIssueToPrAutonomousTask(
       return { ok: passed, summary: mutated ? 'Review changed the owned worktree; evidence is stale.' : missing.length ? `Review omitted changed files: ${missing.join(', ')}` : JSON.stringify(review), review, usage: { inputTokens: reviewRun.evidence.promptTokens, outputTokens: reviewRun.evidence.completionTokens }, evidence: criteria.map((criterion) => ({ evidenceId: `issue-review-${params.runId}-${criterion.id}`, criterionId: criterion.id, name: 'Issue-to-PR structured review', passed, authoritative: true, stale: mutated, summary: JSON.stringify(review), exitCode: passed ? 0 : 1, durationMs: 0, createdAtMs: Date.now(), source: 'review' as const })) };
     },
   };
-  const started = await startAutonomousTask({ objective: `Implement GitHub issue #${params.issueNumber} in ${params.repositorySlug}, within the owned worktree and frozen acceptance policy.`, sessionId: params.sessionId ?? null, constraints: { strategy: 'DELEGATE', source: 'issue', untrustedSource: true, allowExternalDelivery: true }, planningContext: { sourceMaterial: [wrapUntrustedContent('GitHub issue requirements', (externalIssueText(params)).slice(0, 12_000))] }, deliveryIntent: 'open_or_update_pr', deliveryTarget, runtime, signal: params.signal,
+  const started = await startAutonomousTask({ objective: `Implement GitHub issue #${params.issueNumber} in ${params.repositorySlug}, within the owned worktree and frozen acceptance policy.`, sessionId: params.sessionId ?? null, constraints: { strategy: 'DELEGATE', source: 'issue', untrustedSource: true, allowExternalDelivery: false }, planningContext: { sourceMaterial: [wrapUntrustedContent('GitHub issue requirements', (externalIssueText(params)).slice(0, 12_000))] }, deliveryIntent: 'leave_worktree', runtime, signal: params.signal,
     // The persisted Issue-to-PR state machine owns the single repair counter.
     // Disable per-task nested repairs to prevent exceeding the frozen limit.
     budgetSnapshot: { wallTimeMs: issuePolicy.agentWallTimeMs, maxRepairRounds: 0 } });
@@ -203,18 +207,18 @@ export async function runIssueToPrAutonomousTask(
     item.source === 'review' && item.authoritative && item.passed && !item.stale && item.exitCode === 0);
   const planPassed = result.plan?.nodes.some((node) => node.taskClass === 'verification' && node.status === 'succeeded')
     && result.plan.nodes.some((node) => node.taskClass === 'review' && node.status === 'succeeded');
-  const deliveryApprovalBoundary = result.outcome === 'WAITING_APPROVAL'
+  const localEvidenceReady = result.outcome === 'SUCCEEDED'
     && verifiedTests && independentReview && Boolean(planPassed);
   const reviewReceipt = independentlyReviewed as { revision: string; files: string[]; summary: string } | null;
-  if (deliveryApprovalBoundary && reviewReceipt) {
+  if (localEvidenceReady && reviewReceipt) {
     await recordIssueToPrReview(params.runId, reviewReceipt.revision, reviewReceipt.files, reviewReceipt.summary);
     await advanceIssueToPr(params.runId, 'opening_pr', {
       durableRunId: implementationResult?.durableRunId ?? result.taskId,
     });
   }
   return {
-    outcome: deliveryApprovalBoundary && reviewReceipt ? 'completed' : result.outcome === 'CANCELLED' ? 'cancelled' : 'error',
-    summary: deliveryApprovalBoundary && reviewReceipt
+    outcome: localEvidenceReady && reviewReceipt ? 'completed' : result.outcome === 'CANCELLED' ? 'cancelled' : 'error',
+    summary: localEvidenceReady && reviewReceipt
       ? 'Authoritative local verification and independent review passed; GitHub delivery requires typed approval.'
       : result.summary ?? 'Issue-to-PR task did not complete.',
     durableRunId: implementationResult?.durableRunId ?? result.taskId,
