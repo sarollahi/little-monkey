@@ -160,6 +160,8 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
   const store = useIssueToPrStore();
   const [issueUrl, setIssueUrl] = useState("");
   const [maxRepairAttempts, setMaxRepairAttempts] = useState(2);
+  const [agentMinutes, setAgentMinutes] = useState(30);
+  const [totalTokenBudget, setTotalTokenBudget] = useState(250_000);
 
   useEffect(() => {
     void store.init();
@@ -216,7 +218,7 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
         onSubmit={(event) => {
           event.preventDefault();
           if (!issueUrl.trim() || starting) return;
-          void store.start(issueUrl.trim(), maxRepairAttempts).then(() => setIssueUrl(""));
+          void store.start(issueUrl.trim(), maxRepairAttempts, agentMinutes * 60_000, totalTokenBudget).then(() => setIssueUrl(""));
         }}
       >
         <label className="min-w-64 flex-1 text-xs text-muted">
@@ -232,6 +234,18 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
           Max repairs
           <select aria-label="Maximum CI repair attempts" className="mt-1 block rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground" value={maxRepairAttempts} onChange={(event) => setMaxRepairAttempts(Number(event.target.value))}>
             {[0, 1, 2, 3, 4, 5].map((count) => <option key={count} value={count}>{count}</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-muted">
+          Agent time
+          <select aria-label="Agent time budget" className="mt-1 block rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground" value={agentMinutes} onChange={(event) => setAgentMinutes(Number(event.target.value))}>
+            {[5, 15, 30, 60, 120].map((minutes) => <option key={minutes} value={minutes}>{minutes} min</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-muted">
+          Token budget
+          <select aria-label="Total agent token budget" className="mt-1 block rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground" value={totalTokenBudget} onChange={(event) => setTotalTokenBudget(Number(event.target.value))}>
+            {[50_000, 100_000, 250_000, 500_000, 1_000_000].map((tokens) => <option key={tokens} value={tokens}>{(tokens / 1_000).toFixed(0)}k</option>)}
           </select>
         </label>
         <Button type="submit" variant="primary" disabled={starting || !issueUrl.trim()}>
@@ -366,6 +380,7 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
               )}
 
               <IssueToPrTimeline run={selected} />
+              <p className="text-xs text-muted">Frozen execution policy: {Math.round(selected.agentWallTimeMs / 60_000)} minutes per agent · {selected.tokensUsed.toLocaleString()} / {selected.totalTokenBudget.toLocaleString()} provider-reported tokens · {selected.repairAttempts} / {selected.maxRepairAttempts} repair attempts.</p>
 
               {selected.checks.length > 0 && (
                 <div>
