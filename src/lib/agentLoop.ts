@@ -2382,14 +2382,22 @@ function observeRecoveredDesktopTurn(link: ActiveDaemonDesktopTurn): void {
  * the old window's localStorage. This also works when a second desktop client
  * has never seen the first client's local cursor. Discovery does not execute. */
 export function recoverDaemonDesktopTurns(): void {
-  for (const link of loadActiveDaemonTurns()) {
-    if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) {
-      removeActiveDaemonTurn(link.runId);
-      continue;
+  const cached = loadActiveDaemonTurns();
+  const attachCached = () => {
+    for (const link of cached) {
+      if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) {
+        removeActiveDaemonTurn(link.runId);
+        continue;
+      }
+      // An older cached link must not obscure a NEWER accepted run from the
+      // authoritative query. Use it only when the session is not attached.
+      observeRecoveredDesktopTurn(link);
     }
-    observeRecoveredDesktopTurn(link);
+  };
+  if (!isTauri()) {
+    attachCached();
+    return;
   }
-  if (!isTauri()) return;
   void recoverableDesktopTurns().then(({ turns }) => {
     const sessions = useSessionStore.getState().sessions;
     const sessionIds = new Set(sessions.map((session) => session.id));
@@ -2421,7 +2429,11 @@ export function recoverDaemonDesktopTurns(): void {
       saveActiveDaemonTurn(link);
       observeRecoveredDesktopTurn(link);
     }
-  }).catch((error) => console.warn('Authoritative daemon session recovery unavailable:', error));
+    attachCached();
+  }).catch((error) => {
+    console.warn('Authoritative daemon session recovery unavailable:', error);
+    attachCached();
+  });
 }
 
 /** When `artifactAutoPreview` (see `settingsStore.ts`) is on, opens the

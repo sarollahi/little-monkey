@@ -716,6 +716,37 @@ mod tests {
     }
 
     #[test]
+    fn recovery_ignores_terminal_jobs_but_preserves_reconciliation() {
+        let mut store=DaemonStore::open_in_memory().unwrap();
+        let IngressAcceptance::Accepted{ingress_id} = store
+            .accept_ingress_turn(&ingress(ConversationSource::Desktop,"terminal"),&[],NOW).unwrap()
+        else { panic!("new ingress"); };
+        // The job is only an existing daemon job: no executor is involved in
+        // this observation test, and no run is submitted by discovery.
+        let job=super::super::store::NewDaemonJob {
+            job_id:"job-terminal".into(),
+            recipe_snapshot:"/tmp/immutable-recipe.json".into(),
+            priority:0,max_attempts:1,created_at_ms:NOW as u64,
+            max_runtime_ms:60000,max_memory_bytes:None,max_log_bytes:1024,
+            repository_policy_json:None,worktree_json:None,parent_run_id:None,
+        };
+        store.insert_preparing(&job, 128).unwrap();
+        store.mark_ingress_queued(&ingress_id,&job.job_id,NOW+1).unwrap();
+        store.connection.execute(
+            "UPDATE daemon_jobs SET state='succeeded' WHERE job_id=?1",
+            [&job.job_id],
+        ).unwrap();
+        assert!(store.recoverable_desktop_turns(10).unwrap().is_empty());
+        store.connection.execute(
+            "UPDATE daemon_jobs SET state='needs_reconciliation' WHERE job_id=?1",
+            [&job.job_id],
+        ).unwrap();
+        let recovered=store.recoverable_desktop_turns(10).unwrap();
+        assert_eq!(recovered.len(),1);
+        assert_eq!(recovered[0].source_event_id,"terminal");
+    }
+
+    #[test]
     fn session_scoped_attachment_filters_before_limiting() {
         let mut store = DaemonStore::open_in_memory().expect("open");
         store.accept_ingress_turn(

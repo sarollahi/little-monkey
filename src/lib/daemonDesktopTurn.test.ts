@@ -398,6 +398,41 @@ describe("daemon desktop routing and event replay", () => {
     expect(mocks.daemonDecisions).not.toHaveBeenCalled();
   });
 
+  it("detaches a recovered observer without cancelling daemon-owned execution", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1, lastSequence: 0, output: "" },
+      controller.signal,
+      { onProjection: () => undefined },
+      false,
+    );
+    expect(projection.terminal).toBe(false);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+    expect(mocks.loadRunEvents).not.toHaveBeenCalled();
+  });
+
+  it("allows two read-only observers to replay the same run without reexecuting", async () => {
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 1, event: { type: "model_delta", payload: { channel: "assistant", text: "hello" } } },
+      { sequence: 2, event: { type: "completed", payload: { summary: "done" } } },
+    ] as RunEventEnvelopeWire[]);
+    mocks.getRun.mockResolvedValue({ status: "succeeded" } as RunRecord);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const link = { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1, lastSequence: 0, output: "" };
+    const projections: DaemonTurnProjection[] = [];
+    const [one, two] = await Promise.all([
+      watchDaemonDesktopTurn(link, new AbortController().signal,
+        { onProjection: p => projections.push(p) }, false),
+      watchDaemonDesktopTurn(link, new AbortController().signal,
+        { onProjection: p => projections.push(p) }, false),
+    ]);
+    expect(one).toMatchObject({ terminal: true, output: "hello", lastSequence: 2 });
+    expect(two).toMatchObject({ terminal: true, output: "hello", lastSequence: 2 });
+    expect(projections).toHaveLength(2);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
   it("routes an abort to daemon cancellation while still consuming the terminal ledger event", async () => {
     const cancelled = {
       sequence: 2,
