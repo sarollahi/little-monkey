@@ -132,6 +132,9 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         if (controller.signal.aborted) return;
         current = await api.getIssueToPrStatus(current.runId);
         if (current.status === "opening_pr") return;
+        if (current.status === "checking" && result.outcome === "error") {
+          current = await api.advanceIssueToPr(run.runId, current.repairAttempts < current.maxRepairAttempts ? "repairing" : "failed", { error: result.summary });
+        }
         if (current.status === "repairing" && result.outcome === "completed") {
           // Fallback for older model runtimes with no coordinator verification node.
           current = await api.runIssueToPrChecks(current.runId);
@@ -218,7 +221,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         return;
       }
       if (result.outcome === "error") {
-        await api.advanceIssueToPr(run.runId, "failed", {
+        await api.advanceIssueToPr(run.runId, latest.status === "checking" && latest.repairAttempts < latest.maxRepairAttempts ? "repairing" : "failed", {
           error: result.summary,
           durableRunId: result.durableRunId,
         });
