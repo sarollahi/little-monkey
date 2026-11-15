@@ -133,8 +133,21 @@ export async function runIssueToPrAutonomousTask(
   const deliveryTarget: TaskDeliveryTarget = { worktreeId: params.worktreeId ?? params.runId, repositorySlug: params.repositorySlug, branch: params.branch, remote: 'origin', base: params.baseRef, title: `Issue #${params.issueNumber}: ${params.issueTitle}`, body: `Implements GitHub issue #${params.issueNumber}.` };
   const runtime: AutonomousTaskRuntime = {
     ...baseRuntime,
+    // Use the universal coordinator's validated deterministic issue DAG.
+    // Its default LLM planner uses a separate unmetered subagent in the
+    // primary workspace, which would bypass the frozen issue token budget
+    // and may draft scopes outside this owned worktree.
+    plan: undefined,
     executeNode: async (task, node, context) => {
-      if (node.taskClass !== 'implementation') return { ok: true, summary: `Prepared ${node.taskClass} context.` };
+      if (node.taskClass === 'investigation') {
+        const inspection = await inspectOwnedWorktree(deliveryTarget.worktreeId);
+        return {
+          ok: inspection.worktree.marker.branch === params.branch
+            && inspection.worktree.marker.repositorySlug === params.repositorySlug,
+          summary: `Inspected app-owned issue branch ${inspection.headOid}; the implementation agent will inspect and plan file changes inside this worktree.`,
+        };
+      }
+      if (node.taskClass !== 'implementation') return { ok: false, summary: `Unexpected issue implementation node: ${node.taskClass}.` };
       const before = await inspectOwnedWorktree(deliveryTarget.worktreeId);
       implementation = await runIssueToPrAgent({ ...params, runId: params.runId, signal: context.signal });
       const after = await inspectOwnedWorktree(deliveryTarget.worktreeId);
