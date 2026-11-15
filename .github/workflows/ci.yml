@@ -145,6 +145,9 @@ jobs:
       - name: Production build and bundle budget
         run: pnpm build:budget
 
+      - name: Real-Git issue-to-PR repair acceptance (simulated GitHub)
+        run: node --test scripts/issue-to-pr-ci-acceptance.test.mjs
+
       - name: Frontend tests
         run: pnpm test
 
