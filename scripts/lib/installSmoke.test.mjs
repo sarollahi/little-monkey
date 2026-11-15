@@ -42,6 +42,24 @@ test("each platform picks the installer a hosted runner can actually exercise", 
   assert.equal(installPlanFor("freebsd", ["app.pkg"]), null);
 });
 
+test("install selection respects host architecture even when other assets sort first", () => {
+  const linux = [
+    "Little.Monkey_1.12.0_arm64.deb",
+    "Little.Monkey_1.12.0_amd64.deb",
+    "Little.Monkey_1.12.0_aarch64.AppImage",
+  ];
+  assert.equal(installPlanFor("linux", linux, "x64").asset, linux[1]);
+  assert.equal(installPlanFor("linux", linux, "arm64").asset, linux[0]);
+  assert.equal(installPlanFor("linux", [linux[0]], "x64"), null);
+  const windows = ["Little.Monkey_1.12.0_arm64-setup.exe", "Little.Monkey_1.12.0_x64-setup.exe"];
+  assert.equal(installPlanFor("win32", windows, "x64").asset, windows[1]);
+  assert.equal(installPlanFor("win32", windows, "arm64").asset, windows[0]);
+  const mac = ["Little.Monkey_1.12.0_aarch64.dmg", "Little.Monkey_1.12.0_x64.dmg"];
+  assert.equal(installPlanFor("darwin", mac, "arm64").asset, mac[0]);
+  assert.equal(installPlanFor("darwin", mac, "x64").asset, mac[1]);
+  assert.equal(installPlanFor("linux", linux, "riscv64"), null);
+});
+
 test("a missing payload file is a failure, not a skip", () => {
   // The installer ran, so this is a real answer about a real install.
   const expected = expectedPayload("linux");
@@ -138,4 +156,7 @@ test("only a real failure fails the release", () => {
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Skip }]), 0);
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Skip }, { outcome: OUTCOME.Skip }]), 0);
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Fail }]), 1);
+  assert.equal(exitCodeFor([{ outcome: OUTCOME.Skip }], { requireClean: true }), 1);
+  assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Skip }], { requireClean: true }), 0);
+  assert.equal(exitCodeFor([], { requireClean: true }), 1);
 });
