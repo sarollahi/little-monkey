@@ -360,17 +360,54 @@ impl DaemonStore {
     /// Recovery consumes this read model; it never submits, retries, or takes
     /// over a run. A terminal reconciliation row remains visible to observers.
     pub fn recoverable_desktop_turns(&self, limit: u32) -> Result<Vec<StoredIngressTurn>, String> {
+        // A daemon may finish between the desktop crash and its next start.
+        // Recent terminal runs must remain discoverable, or the final answer
+        // can never be reconstructed even though its run ledger is intact.
+        // Older completed history remains available through explicit queries.
+        const RECENT_TERMINAL_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis()
+            .try_into()
+            .unwrap_or(i64::MAX);
+        self.recoverable_desktop_turns_since(limit, now_ms.saturating_sub(RECENT_TERMINAL_MS))
+    }
+
+    fn recoverable_desktop_turns_since(
+        &self,
+        limit: u32,
+        terminal_since_ms: i64,
+    ) -> Result<Vec<StoredIngressTurn>, String> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns
-             WHERE source IN ('desktop','voice') AND
-               (state='accepted' OR (state='queued' AND job_id IN
-                 (SELECT job_id FROM daemon_jobs WHERE state IN
+             WHERE source IN ('desktop','voice') AND (
+               state='accepted' OR
+               (state='queued' AND (
+                 job_id IN (
+                   SELECT job_id FROM daemon_jobs WHERE state IN
+                   ('preparing','queued','running','waiting_approval','paused',
+                    'cancelling','needs_reconciliation')
+                 ) OR (
+                   created_at_ms >= ?2 AND job_id IN (
+                     SELECT job_id FROM daemon_jobs WHERE state IN
+                     ('succeeded','failed','cancelled')
+                   )
+                 )
+               ))
+             )
+             ORDER BY
+               CASE WHEN state='accepted' OR job_id IN (
+                 SELECT job_id FROM daemon_jobs WHERE state IN
                  ('preparing','queued','running','waiting_approval','paused',
-                  'cancelling','needs_reconciliation'))))
-             ORDER BY created_at_ms DESC, ingress_id DESC LIMIT ?1"
+                  'cancelling','needs_reconciliation')
+               ) THEN 0 ELSE 1 END,
+               created_at_ms DESC, ingress_id DESC LIMIT ?1"
         )).map_err(|error| error.to_string())?;
-        let rows = statement.query_map([i64::from(limit.clamp(1, 2000))], read_ingress_turn)
-            .map_err(|error| error.to_string())?;
+        let rows = statement.query_map(
+            rusqlite::params![i64::from(limit.clamp(1, 2000)), terminal_since_ms],
+            read_ingress_turn,
+        ).map_err(|error| error.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -759,12 +796,17 @@ mod tests {
             "UPDATE daemon_jobs SET state='succeeded' WHERE job_id=?1",
             [&job.job_id],
         ).unwrap();
-        assert!(store.recoverable_desktop_turns(10).unwrap().is_empty());
+        // Historical rows outside the bounded terminal window are excluded
+        // from automated startup replay but remain in the immutable ledger.
+        assert!(store.recoverable_desktop_turns_since(10, NOW + 1).unwrap().is_empty());
+        let historical = store.recoverable_desktop_turns_since(10, NOW - 1).unwrap();
+        assert_eq!(historical.len(), 1);
+        assert_eq!(historical[0].source_event_id, "terminal");
         store.connection.execute(
             "UPDATE daemon_jobs SET state='needs_reconciliation' WHERE job_id=?1",
             [&job.job_id],
         ).unwrap();
-        let recovered=store.recoverable_desktop_turns(10).unwrap();
+        let recovered=store.recoverable_desktop_turns_since(10, NOW + 1).unwrap();
         assert_eq!(recovered.len(),1);
         assert_eq!(recovered[0].source_event_id,"terminal");
     }

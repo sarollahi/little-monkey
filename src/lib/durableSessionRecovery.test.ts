@@ -28,6 +28,18 @@ describe('authoritative session recovery selection', () => {
       .map(v => v.ingress_id)).toEqual(['other','newer']);
   });
 
+  it('reattaches recently completed runs if the UI died before seeing completion', () => {
+    const ids = new Set(['session-a']);
+    const succeeded = turn({
+      ingress_id: 'completed-after-desktop-crash',
+      created_at_ms: 300,
+      state: 'queued',
+      run_id: 'run-final',
+      run_state: 'succeeded',
+    });
+    expect(latestRecoverableTurns([succeeded], ids)).toEqual([succeeded]);
+  });
+
   it('does not attach a stale run while a newer turn awaits durable admission', () => {
     const ids = new Set(['session-a']);
     const turns = [

@@ -6,6 +6,7 @@ import type { IngressTurn } from './ingressClient';
 const WATCHABLE = new Set([
   'preparing', 'queued', 'running', 'waiting_approval',
   'paused', 'cancelling', 'needs_reconciliation',
+  'succeeded', 'failed', 'cancelled',
 ]);
 
 /** The most recent admitted identity wins, even if it is still accepted and

@@ -156,3 +156,15 @@ originating window's still-streaming session snapshot. It does **not** make
 arbitrary simultaneous user edits from different windows transactionally
 conflict-free. An observer reattaches from the ledger on a subsequent startup
 instead of treating a UI-only snapshot as a saved result.
+
+## Completed run after desktop crash
+
+The daemon's recovery read query also includes **completed, failed and
+cancelled** desktop/voice turns admitted within the last seven days. This closes
+the interval where a resident worker finishes after its desktop observer dies:
+on the next startup, the UI can replay the final ledger result without
+submitting another model request. Live or reconciliation-required work is
+prioritized in the bounded recovery page, so recent completed runs cannot
+evict active runs simply by having a newer timestamp. The bounded seven-day
+window is a *discovery* policy, not permission to erase immutable ledger
+events. Older completed runs require explicit run/session lookup.
