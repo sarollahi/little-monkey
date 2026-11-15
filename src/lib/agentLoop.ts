@@ -2395,14 +2395,16 @@ function observeRecoveredDesktopTurn(link: ActiveDaemonDesktopTurn): void {
  * has never seen the first client's local cursor. Discovery does not execute. */
 export function recoverDaemonDesktopTurns(): void {
   const cached = loadActiveDaemonTurns();
-  const attachCached = () => {
+  const authoritativeSessions = new Set<string>();
+  const attachCached = (awaitingAdmission: ReadonlySet<string> = new Set()) => {
     for (const link of cached) {
       if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) {
         removeActiveDaemonTurn(link.runId);
         continue;
       }
-      // An older cached link must not obscure a NEWER accepted run from the
-      // authoritative query. Use it only when the session is not attached.
+      if (authoritativeSessions.has(link.sessionId) || awaitingAdmission.has(link.sessionId)) continue;
+      // An older cached link must not obscure a newer accepted run from
+      // the authoritative store. The cache is only a safe fallback.
       observeRecoveredDesktopTurn(link);
     }
   };
@@ -2410,42 +2412,81 @@ export function recoverDaemonDesktopTurns(): void {
     attachCached();
     return;
   }
-  void recoverableDesktopTurns().then(({ turns }) => {
-    const sessions = useSessionStore.getState().sessions;
-    const sessionIds = new Set(sessions.map((session) => session.id));
-    // Newest eligible run per session; filtering on source_account_id makes
-    // editor and paired-device sessions distinct unless explicitly enrolled.
-    for (const turn of latestRecoverableTurns(turns, sessionIds)) {
-      const session = useSessionStore.getState().sessions.find((s) => s.id === turn.source_account_id);
-      if (!session || turnControllers.has(session.id) || !turn.run_id) continue;
-      let assistantIndex = durableAssistantIndex(session.messages, turn.source_event_id, turn.run_id);
-      if (assistantIndex === null) {
-        // The daemon accepted the turn, but the UI died before persisting its
-        // placeholder; create only a display row, never another model turn.
-        assistantIndex = session.messages.length;
-        useSessionStore.getState().addMessage(session.id, {
-          role: 'assistant', content: 'Reconnecting to the resident runner…',
-          durableTurn: { turnId: turn.source_event_id, runId: turn.run_id },
-        });
+
+  let retryDelayMs = 2_000;
+  const retry = () => {
+    const delay = retryDelayMs;
+    retryDelayMs = Math.min(30_000, retryDelayMs * 2);
+    setTimeout(discover, delay);
+  };
+  const discover = () => {
+    void recoverableDesktopTurns().then(({ turns }) => {
+      const sessions = useSessionStore.getState().sessions;
+      const sessionIds = new Set(sessions.map((session) => session.id));
+      // An accepted turn without a job ID is already durable. The daemon may
+      // be recovering it right now; do not attach an older cached run instead
+      // and do not submit a duplicate turn in an attempt to "resume" it.
+      const awaitingAdmission = new Set(
+        turns.filter((turn) => sessionIds.has(turn.source_account_id)
+          && (turn.source === 'desktop' || turn.source === 'voice')
+          && (turn.state === 'accepted'
+            || (turn.state === 'queued' && turn.run_id === null)))
+          .map((turn) => turn.source_account_id),
+      );
+
+      // Newest eligible run per session; filtering by source_account_id makes
+      // editor and paired-device sessions distinct unless explicitly enrolled.
+      for (const turn of latestRecoverableTurns(turns, sessionIds)) {
+        const session = useSessionStore.getState().sessions.find((s) => s.id === turn.source_account_id);
+        if (!session || !turn.run_id || authoritativeSessions.has(session.id)) continue;
+        if (turnControllers.has(session.id)) {
+          // A cached observer may be watching an older run. Detach it, never
+          // cancel it, then retry discovery to attach the new authoritative run.
+          if (recoveredObserverRuns.has(session.id)
+              && recoveredObserverRuns.get(session.id) !== turn.run_id) {
+            turnControllers.get(session.id)?.abort();
+            retry();
+          }
+          continue;
+        }
+        let assistantIndex = durableAssistantIndex(session.messages, turn.source_event_id, turn.run_id);
+        if (assistantIndex === null) {
+          // The daemon accepted the turn, but the UI died before persisting its
+          // placeholder; create only a display row, never another model turn.
+          assistantIndex = session.messages.length;
+          useSessionStore.getState().addMessage(session.id, {
+            role: 'assistant', content: 'Reconnecting to the resident runner…',
+            durableTurn: { turnId: turn.source_event_id, runId: turn.run_id },
+          });
+        }
+        const link: ActiveDaemonDesktopTurn = {
+          sessionId: session.id,
+          turnId: turn.source_event_id,
+          runId: turn.run_id,
+          jobId: turn.job_id ?? undefined,
+          assistantIndex,
+          lastSequence: 0,
+          output: '',
+          source: turn.source === 'voice' ? 'voice' : 'desktop',
+        };
+        authoritativeSessions.add(session.id);
+        saveActiveDaemonTurn(link);
+        observeRecoveredDesktopTurn(link);
       }
-      const link: ActiveDaemonDesktopTurn = {
-        sessionId: session.id,
-        turnId: turn.source_event_id,
-        runId: turn.run_id,
-        jobId: turn.job_id ?? undefined,
-        assistantIndex,
-        lastSequence: 0,
-        output: '',
-        source: turn.source === 'voice' ? 'voice' : 'desktop',
-      };
-      saveActiveDaemonTurn(link);
-      observeRecoveredDesktopTurn(link);
-    }
-    attachCached();
-  }).catch((error) => {
-    console.warn('Authoritative daemon session recovery unavailable:', error);
-    attachCached();
-  });
+      attachCached(awaitingAdmission);
+      // An accepted-but-not-queued turn is recovered by the daemon's existing
+      // ingress replay. Poll only its state; never submit a second operation.
+      if (awaitingAdmission.size > 0) retry();
+      else retryDelayMs = 2_000;
+    }).catch((error) => {
+      console.warn('Authoritative daemon session recovery unavailable:', error);
+      attachCached();
+      // A temporarily stopped daemon or unavailable sidecar must not make an
+      // old cached cursor the only recovery opportunity until the next restart.
+      retry();
+    });
+  };
+  discover();
 }
 
 /** When `artifactAutoPreview` (see `settingsStore.ts`) is on, opens the
