@@ -119,7 +119,8 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         }).slice(0, 12_000);
         const result = await (autonomousIssueRunner ?? runIssueToPrAgent)({
           runId: current.runId,
-          agentRunId: current.runId + "-repair-" + current.repairAttempts,
+          // New provider calls after a crash must not reuse old token event IDs.
+          agentRunId: current.runId + "-repair-" + current.repairAttempts + "-" + crypto.randomUUID(),
           repositorySlug: current.repositorySlug,
           issueNumber: current.issueNumber,
           issueTitle: current.issueTitle,
@@ -193,6 +194,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       await api.advanceIssueToPr(run.runId, "implementing");
       const result = await (autonomousIssueRunner ?? runIssueToPrAgent)({
         runId: run.runId,
+        agentRunId: run.runId + "-implementation-" + crypto.randomUUID(),
         repositorySlug: run.repositorySlug,
         issueNumber: run.issueNumber,
         issueTitle: run.issueTitle,
