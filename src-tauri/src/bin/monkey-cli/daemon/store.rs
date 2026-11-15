@@ -2667,6 +2667,55 @@ mod tests {
         assert!(store.committed_reservations().unwrap().is_empty());
     }
 
+    /// V21 adds an index, not a second session store. An old accepted turn
+    /// and its immutable identity must survive migration without modification.
+    #[test]
+    fn durable_session_lookup_upgrades_a_v20_queue_in_place() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE daemon_migrations (
+                version INTEGER PRIMARY KEY,
+                checksum TEXT NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+             ) STRICT;"
+        ).unwrap();
+        for &(version, checksum, sql) in DAEMON_MIGRATIONS {
+            if version > DAEMON_V20 { break; }
+            connection.execute_batch(sql).unwrap();
+            connection.execute(
+                "INSERT INTO daemon_migrations(version,checksum,applied_at_ms)
+                 VALUES(?1,?2,1)",
+                rusqlite::params![version, checksum],
+            ).unwrap();
+        }
+        connection.execute_batch(
+            "INSERT INTO ingress_turns (
+                 ingress_id,dedupe_key,source,source_account_id,source_event_id,
+                 session_key,state,ingress_json,params_json,attempts,
+                 created_at_ms,updated_at_ms
+             ) VALUES (
+                 'saved','desktop:session-a:turn-a','desktop','session-a','turn-a',
+                 'desktop:session-a','accepted','{}','[]',0,100,100
+             );"
+        ).unwrap();
+        apply_daemon_migrations(&connection).unwrap();
+        let index: String = connection.query_row(
+            "SELECT name FROM sqlite_master WHERE type='index'
+             AND name='ingress_turns_session_attachment_idx'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(index, "ingress_turns_session_attachment_idx");
+        let store = DaemonStore { connection };
+        let rows = store.recent_ingress_turns_filtered(
+            Some(crate::channels::ingress::ConversationSource::Desktop),
+            Some("session-a"), 10,
+        ).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_event_id, "turn-a");
+        assert_eq!(rows[0].state, crate::daemon::ingress_store::IngressState::Accepted);
+        assert_eq!(rows[0].execution_version, None);
+    }
+
     /// Peer provenance arrives on a database that is already at V17 — the
     /// telephony shape, which is what a live installation is sitting on.
     ///

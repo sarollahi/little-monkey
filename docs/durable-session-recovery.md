@@ -35,7 +35,10 @@ accepted run to execute again. The old watcher cache is fallback only when the
 authoritative lookup does not produce an attachable run for that session.
 
 Observers replay from run ledger sequence 0 when they have no saved cursor.
-Once a cursor is saved, replays request only events beyond that cursor. The
+If the daemon has accepted an ingress turn but has not yet assigned its run
+ID, the desktop retries discovery with a bounded backoff; it never re-submits
+the accepted operation. Once a cursor is saved, replays request only events
+beyond that cursor. The
 run ledger owns event order, transactional append, write-once tool outcomes and
 retention; observers never persist their own authoritative event log. A second
 observer cannot expand the immutable permission policy, workspace roots,
