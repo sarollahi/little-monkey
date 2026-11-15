@@ -342,7 +342,8 @@ describe("issueToPrStore", () => {
     await useIssueToPrStore.getState().init();
     await flush(20);
 
-    expect(api.reconcileIssueToPrPr).toHaveBeenCalledExactlyOnceWith(openingPr.runId);
+    expect(api.reconcileIssueToPrPr).toHaveBeenCalledTimes(1);
+    expect(api.reconcileIssueToPrPr).toHaveBeenCalledWith(openingPr.runId);
     expect(useIssueToPrStore.getState().runs.find((run) => run.runId === openingPr.runId)).toMatchObject({
       status: "monitoring_ci", prNumber: 42,
     });
