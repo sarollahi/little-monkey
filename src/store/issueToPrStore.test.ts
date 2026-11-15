@@ -36,6 +36,7 @@ function fixtureRun(overrides: Partial<IssueToPrRun> = {}): IssueToPrRun {
     issueNumber: 7,
     issueTitle: "Fix the bug",
     issueBody: "Steps to reproduce…",
+    issueComments: [],
     worktreeId: "wt-1",
     branch: "issue-to-pr/issue-7-abcdefgh",
     baseRef: "develop",
