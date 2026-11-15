@@ -5,7 +5,7 @@ import type { IssueToPrRun } from "../lib/issueToPr";
 import { isTerminalIssueToPrStatus } from "../lib/issueToPr";
 import * as issueToPrRunner from "../lib/issueToPrRunner";
 import { errorMessage } from "../lib/errors";
-import { githubReviewThreads } from "../lib/gitDelivery";
+import { githubReviewThreads, githubFailureLogs } from "../lib/gitDelivery";
 
 function errorText(error: unknown): string {
   return errorMessage(error);
@@ -106,11 +106,15 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         const reviewThreads = current.prNumber
           ? await githubReviewThreads(current.worktreeId, current.prNumber).catch(() => null)
           : null;
+        const logs = current.prNumber
+          ? await githubFailureLogs(current.worktreeId, current.prNumber).catch(() => null)
+          : null;
         const repairEvidence = JSON.stringify({
           failingLocalChecks,
           ciHead: lastCi?.headOid ?? null,
           ciVerdict: lastCi?.verdict ?? null,
           ciChecks: lastCi?.checks.filter((check) => !["SUCCESS", "SKIPPED", "NEUTRAL"].includes(check.conclusion)) ?? [],
+          failedActionsLogs: logs?.headRefOid === lastCi?.headOid ? logs?.logs : null,
           reviewThreads,
         }).slice(0, 12_000);
         const result = await (autonomousIssueRunner ?? runIssueToPrAgent)({
