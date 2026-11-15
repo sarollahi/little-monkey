@@ -9,6 +9,7 @@ const fixture = (changes: Partial<IssueToPrRun> = {}): IssueToPrRun => ({
   issueNumber: 42,
   issueTitle: "Fix the check",
   issueBody: "Expected behavior",
+  issueComments: [],
   worktreeId: "owned-fixture",
   branch: "issue-to-pr/fixture",
   baseRef: "develop",
