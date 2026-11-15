@@ -437,7 +437,7 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
                     <Button size="sm" onClick={() => window.open(selected.prUrl ?? undefined, "_blank", "noopener,noreferrer")}>
                       <ExternalLink size={13} /> {t("IssueToPr.openPrLinkButton")}
                     </Button>
-                    {(selected.status === "ready" || selected.status === "awaiting_review") && (
+                    {selected.status === "ready" && (
                       <Button size="sm" variant="primary" disabled={store.busy[`done:${selected.runId}`]} onClick={() => void store.markDone(selected.runId)}>
                         <CheckCircle2 size={13} /> {t("IssueToPr.markDoneButton")}
                       </Button>
