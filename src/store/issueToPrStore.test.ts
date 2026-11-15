@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   pollIssueToPrCi: vi.fn(),
   beginIssueToPrRepair: vi.fn(),
   setIssueToPrRepairLimit: vi.fn(),
+  setIssueToPrExecutionBudget: vi.fn(),
   listenIssueToPrProgress: vi.fn(),
 }));
 
@@ -48,6 +49,10 @@ function fixtureRun(overrides: Partial<IssueToPrRun> = {}): IssueToPrRun {
     repairAttempts: 0,
     maxRepairAttempts: 2,
     repairInProgress: false,
+    agentWallTimeMs: 30 * 60_000,
+    totalTokenBudget: 250_000,
+    tokensUsed: 0,
+    usageEventIds: [],
     error: null,
     durableRunId: null,
     createdAtMs: 1,
@@ -92,6 +97,7 @@ beforeEach(() => {
   api.runIssueToPrChecks.mockResolvedValue(fixtureRun());
   api.getIssueToPrStatus.mockResolvedValue(fixtureRun());
   api.setIssueToPrRepairLimit.mockImplementation(async () => fixtureRun());
+  api.setIssueToPrExecutionBudget.mockImplementation(async () => fixtureRun());
   api.pollIssueToPrCi.mockResolvedValue(fixtureRun({ status: "monitoring_ci" }));
   api.beginIssueToPrRepair.mockResolvedValue(fixtureRun({ status: "repairing", repairAttempts: 1, repairInProgress: true }));
   runner.runIssueToPrAgent.mockResolvedValue({
