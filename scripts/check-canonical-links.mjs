@@ -18,6 +18,11 @@ const run = spawnSync("git", [
   "https?://(github[.]com|raw[.]githubusercontent[.]com)/AA-Box/little-monkey([/#?]|$)",
   "--", "README.md", "ROADMAP.md", "SECURITY.md", "CONTRIBUTING.md",
   "docs", "src", "src-tauri", "scripts", ".github",
+  // The scanner's own negative test string is not a stale outgoing link.
+  ":(exclude)scripts/check-canonical-links.mjs",
+  // This Rust fixture preserves the original 2026 publication payload byte-
+  // for-byte as a historical compatibility test, not a live download link.
+  ":(exclude)src-tauri/src/m3_runtime_hub.rs",
 ], { cwd: root, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
 if (run.error) throw run.error;
 if (run.status === 0) {
