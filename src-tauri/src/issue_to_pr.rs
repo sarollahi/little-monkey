@@ -807,7 +807,7 @@ pub fn issue_to_pr_record_review(
     }
     let changed: Vec<&str> = inspection.files.iter().filter(|file| !file.ignored)
         .map(|file| file.path.as_str()).collect();
-    if changed.is_empty() || changed.iter().any(|path| !files_reviewed.iter().any(|reviewed| reviewed == path)) {
+    if changed.is_empty() || changed.iter().any(|path| !files_reviewed.iter().any(|reviewed| reviewed.as_str() == *path)) {
         return Err("Independent review did not cover every changed file".to_string());
     }
     run.review_evidence = Some(ReviewEvidence {
