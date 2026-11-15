@@ -71,7 +71,12 @@ Cross-process daemon and execution-target behavior is additionally covered by th
 ## Issue-to-draft-PR CI verification and bounded repair
 
 The existing Issue-to-PR panel and Universal Autonomous Task coordinator share
-the owned Git worktree and `m5_delivery` approval boundary. Starting an issue
+the owned Git worktree and `m5_delivery` approval boundary. The issue-specific
+coordinator uses the validated deterministic DAG and the actual owned-worktree
+headless coding agent; it disables the independent unmetered default planner
+that would otherwise run in the primary workspace. The model's code
+investigation, mutations and reviewer calls are all charged against the same
+persisted issue budget. Starting an issue
 requires an authenticated `gh` and a primary Git workspace whose GitHub
 remote matches the requested repository. The issue title, body, comments,
 review threads, and CI failure descriptions are **untrusted data**; none can
@@ -87,16 +92,19 @@ with complete file coverage before the app enables Git delivery. Results,
 failed checks, review evidence, and the durable task link remain inspectable
 from the issue panel/run ledger.
 
-Git delivery is deliberately not autonomous: each owned-worktree commit,
-push, and draft PR creation/update requires a separately previewed, typed
-`m5_delivery` confirmation. Edits on a previously pushed draft PR are
+Git delivery is deliberately not autonomous: the issue coordinator
+completes the local verified worktree and hands it to exactly one native
+`m5_delivery` approval flow. Each owned-worktree commit, push, and draft
+PR creation/update requires a separately previewed, typed confirmation. Edits on a previously pushed draft PR are
 committed on the same owned branch and the existing PR is updated, never
 replaced or force-pushed. An ambiguous Git state fails closed.
 
 After the operator approves delivery, the panel polls GitHub's real
 `statusCheckRollup` every 30 seconds. Observations are persisted by exact
 PR head commit, deduplicated against repeated polls, and exposed in the
-nine-stage timeline. Missing checks, pending checks, unsuccessful checks,
+nine-stage timeline. A green CI rollup must remain unchanged across two
+observations at least 30 seconds apart before it can become Ready; another
+workflow's late-arriving check invalidates the settling window. Missing checks, pending checks, unsuccessful checks,
 stale SHA responses, and changed PR ownership cannot be reported as ready.
 Failed checks feed a bounded repair through the existing autonomous task
 coordinator; after an independent review and new authoritative local checks,
@@ -144,7 +152,12 @@ Live GitHub verification requires the operator's authenticated `gh` account
 and write access to the repo for push/PR mutations; an actual GitHub Actions
 run for the new draft PR is the authoritative remote acceptance test.
 Monitoring starts from the primary desktop's boot lifecycle even if the
-Issue-to-PR panel is never opened. Verified `ready` runs keep being polled and
+Issue-to-PR panel is never opened. Restarting a run stopped during local
+checking reattaches the existing owned diff, reruns authoritative tests and
+independent review, and does not replay coding edits. If GitHub already
+created an approved draft PR but local persistence stopped, startup can
+read-only reconcile the exact repository, owned branch, base, draft state
+and HEAD. Ambiguous or stale results never trigger a duplicate write. Verified `ready` runs keep being polled and
 are demoted on an owned-worktree/head mismatch. The desktop must be running
 to poll: the Rust run record survives a daemon restart, but **unattended
 CI polling across a completely stopped desktop is not yet a daemon service**. Live model-backed CI repair,
