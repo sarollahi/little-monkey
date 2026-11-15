@@ -19,12 +19,28 @@ only with disposable test workspaces and identities.
 4. Choose and record the exact model ID, weights digest when known, local or
    cloud provider, quantization, runtime/build and permission mode. Capture a
    **real app/daemon run**, approvals granted/denied, trace and attempt count.
-5. Run the independent `verify` subcommand described in [First run](first-run.md).
+5. Run the independent `verify` subcommand described in [First run](first-run.md), or run the complete opt-in installed-CLI live harness on a model-capable host.
    It must record a functional pass with a scope-limited Git diff, new tab
    regression, zero test failures and independent whitespace probes. Inspect
    the permission trace yourself; JSON labels do not verify the model identity.
 6. Preserve the full, unedited console output, Git patch and evidence JSON.
    If the run failed, cancelled, or required a retry, label it accurately.
+
+## Available execution paths
+
+- [Linux candidate installer E2E](../.github/workflows/linux-candidate-package-e2e.yml)
+  builds a real unsigned x64 `.deb` on a temporary Ubuntu runner, checks
+  runtime manifests, runs installer payload and CLI smoke checks, and installs
+  the same candidate through `apt`. It is not a GUI run or a real upgrade,
+  and it does not publish artifacts as a GitHub Release.
+- [Real-model first-run](../.github/workflows/first-run-live-e2e.yml) is
+  **manual-only** on a provisioned self-hosted runner; it invokes the installed
+  daemon and configured target, stores actual events and checks the terminal
+  run state plus independent code changes. It is not exercised by ordinary CI.
+- The existing `release.yml` no longer runs on every push to `main`.
+  It now requires manual `workflow_dispatch`, an explicit publish approval,
+  a reviewed evidence URL and selection of the `main` branch. The URL is
+  an operator attestation, not automated proof of the checks it links to.
 
 ## Candidate gates and what counts as evidence
 
