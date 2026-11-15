@@ -134,7 +134,7 @@ export async function runIssueToPrAutonomousTask(
         return { ok: false, summary: 'Diff is empty or truncated; an independent review cannot verify the change.' };
       }
       const diff = [before.diffs.staged.text, before.diffs.unstaged.text, before.diffs.head.text].filter(Boolean).join('\n').slice(0, 32_000);
-      const reviewRun = await runHeadlessAgent({ runId: `${params.runId}-review`, signal: context.signal, systemPrompt: 'Review the owned worktree diff for the stated issue. Return strict JSON only: {"verdict":"pass"|"changes_required","findings":[{"severity":"blocking"|"warning"|"suggestion","path":string,"title":string,"body":string}],"filesReviewed":string[],"acceptanceCriteria":string[],"securityFindings":string[],"testCoverageFindings":string[]}. Do not mutate files.', userMessage: `Issue #${params.issueNumber}: ${params.issueTitle}\n${wrapUntrustedContent('Issue body', params.issueBody)}\nReview the implementation and checks in the app-owned worktree ${params.workspaceLabel}.\n${wrapUntrustedContent("Owned Git diff", diff)}\nFiles requiring review: ${changedFiles.join(", ")}.`, maxIterations: 8, executionSource: 'issue-to-pr-review', durableRun: { task: `Review issue-to-PR #${params.issueNumber}`, instructions: `Owned branch ${params.branch}` } });
+      const reviewRun = await runHeadlessAgent({ runId: `${params.agentRunId ?? params.runId}-review`, signal: context.signal, toolProfile: 'explore', requiredWorkspaceRoot: params.workspaceLabel, systemPrompt: 'Review the owned worktree diff for the stated issue. Return strict JSON only: {"verdict":"pass"|"changes_required","findings":[{"severity":"blocking"|"warning"|"suggestion","path":string,"title":string,"body":string}],"filesReviewed":string[],"acceptanceCriteria":string[],"securityFindings":string[],"testCoverageFindings":string[]}. Do not mutate files.', userMessage: `Issue #${params.issueNumber}: ${params.issueTitle}\n${wrapUntrustedContent('Issue body', params.issueBody)}\nReview the implementation and checks in the app-owned worktree ${params.workspaceLabel}.\n${wrapUntrustedContent("Owned Git diff", diff)}\nFiles requiring review: ${changedFiles.join(", ")}.`, maxIterations: 8, executionSource: 'issue-to-pr-review', durableRun: { task: `Review issue-to-PR #${params.issueNumber}`, instructions: `Owned branch ${params.branch}` } });
       const review = parseStructuredReview(reviewRun.summary);
       const after = await inspectOwnedWorktree(deliveryTarget.worktreeId);
       const mutated = revision !== await inspectionRevision(after);
@@ -218,6 +218,7 @@ export async function runIssueToPrAgent(
     signal: params.signal,
     systemPrompt,
     userMessage,
+    requiredWorkspaceRoot: params.workspaceLabel,
     maxIterations: MAX_ISSUE_TO_PR_ITERATIONS,
     executionSource: 'issue-to-pr',
     durableRun: {
