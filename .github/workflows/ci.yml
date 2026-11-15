@@ -186,6 +186,23 @@ jobs:
         timeout-minutes: 8
         run: pnpm test:browser-policy
 
+      - name: First-run acceptance fixture and honest evidence contracts
+        # Runs the deliberately failing baseline as an EXPECTED baseline, plus
+        # real temporary Git checkouts for repaired/out-of-scope scenarios.
+        # No model is invoked here: this cannot certify agent success.
+        run: |
+          node --check scripts/first-run-acceptance.mjs
+          node --test scripts/first-run-acceptance.contract.test.mjs
+          node scripts/first-run-acceptance.mjs baseline --output "$RUNNER_TEMP/little-monkey-first-run-baseline.json"
+
+      - name: Upload real first-run baseline evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-run-baseline
+          path: ${{ runner.temp }}/little-monkey-first-run-baseline.json
+          if-no-files-found: error
+
       - name: Install/upgrade smoke-test logic
         # The decision logic only. The install itself runs in `release.yml`,
         # where there are installers to install; this holds the rule that a leg
