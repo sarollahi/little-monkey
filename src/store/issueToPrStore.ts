@@ -44,7 +44,7 @@ interface IssueToPrState {
   init: () => Promise<void>;
   refresh: () => Promise<void>;
   selectRun: (runId: string | null) => void;
-  start: (issueUrl: string, maxRepairAttempts?: number) => Promise<IssueToPrRun>;
+  start: (issueUrl: string, maxRepairAttempts?: number, agentWallTimeMs?: number, totalTokenBudget?: number) => Promise<IssueToPrRun>;
   cancel: (runId: string) => Promise<void>;
   markPrOpened: (runId: string, prNumber: number, prUrl: string) => Promise<void>;
   markDone: (runId: string) => Promise<void>;
@@ -326,10 +326,11 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
     selectRun: (runId) => set({ selectedRunId: runId }),
 
-    start: (issueUrl, maxRepairAttempts = 2) =>
+    start: (issueUrl, maxRepairAttempts = 2, agentWallTimeMs = 30 * 60_000, totalTokenBudget = 250_000) =>
       perform("start", async () => {
         const initial = await api.startIssueToPr(issueUrl);
-        const run = await api.setIssueToPrRepairLimit(initial.runId, maxRepairAttempts);
+        await api.setIssueToPrRepairLimit(initial.runId, maxRepairAttempts);
+        const run = await api.setIssueToPrExecutionBudget(initial.runId, agentWallTimeMs, totalTokenBudget);
         set((state) => ({ runs: upsertRun(state.runs, run), selectedRunId: run.runId }));
         void driveRun(run);
         return run;
