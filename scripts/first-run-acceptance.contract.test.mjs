@@ -51,6 +51,7 @@ test("baseline actually runs the broken fixture, records raw failing TAP output 
   assert.notEqual(evidence.commands.fixtureTests.exitCode, 0);
   assert.match(evidence.commands.fixtureTests.stdout, /not ok/);
   assert.equal(evidence.measuredPerformance.firstTokenMs, null);
+  assert.match(evidence.sourceCommit, /^[a-f0-9]{40}$/);
 });
 
 test("verification fails on unchanged broken code", (t) => {
@@ -82,6 +83,24 @@ test("independently verifies a real code change, scope and additional tab regres
   assert.equal(evidence.agentTrace.provided, false);
   assert.equal(evidence.checks.manualPermissionReview, false);
   assert.equal(evidence.measuredPerformance.agentTaskMs, null);
+});
+
+test("recorded baseline SHA still verifies edits after an agent commits them", (t) => {
+  const dir = fixture(t);
+  const baseline = invoke(dir, "baseline", "before.json").evidence;
+  assert.match(baseline.sourceCommit, /^[a-f0-9]{40}$/);
+  const impl = join(dir, "normalize.mjs");
+  writeFileSync(impl, readFileSync(impl, "utf8").replace("replaceAll(' ', '-')", "replace(/\\s+/g, '-')"));
+  const suite = join(dir, "normalize.test.mjs");
+  writeFileSync(suite, readFileSync(suite, "utf8") +
+    "\\ntest('tabs collapse', () => { assert.equal(normalizeUserId('Ada\\\\tLovelace'), 'ada-lovelace'); });\\n");
+  assert.equal(run("git", ["add", "normalize.mjs", "normalize.test.mjs"], dir).status, 0);
+  assert.equal(run("git", ["commit", "-qm", "agent committed the fix"], dir).status, 0);
+  const { result, evidence } = invoke(dir, "verify", "after.json", ["--base", baseline.sourceCommit]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(evidence.outcome, "FUNCTIONAL_PASS_MANUAL_REVIEW_REQUIRED");
+  assert.equal(evidence.sourceCommit, baseline.sourceCommit);
+  assert.equal(evidence.checks.inScope, true);
 });
 
 test("out-of-scope edits are rejected even when all fixture tests pass", (t) => {
