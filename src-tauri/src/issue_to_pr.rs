@@ -568,6 +568,11 @@ pub fn issue_to_pr_advance(
     let path = runs_path()?;
     let mut runs = load_runs_from(&path);
     let mut run = require_run(&runs, &run_id)?;
+    if status == "ready" {
+        // Only issue_to_pr_poll_ci may establish readiness after consulting
+        // authoritative GitHub checks for the matching owned PR commit.
+        return Err("Ready is reserved for authoritative GitHub CI verification".to_string());
+    }
     if !valid_transition(&run.status, &status) {
         return Err(format!(
             "Cannot move an issue-to-pr run from '{}' to '{status}'",
@@ -1183,6 +1188,8 @@ mod tests {
         assert!(valid_transition("monitoring_ci", "ready"));
         assert!(valid_transition("ready", "done"));
         assert!(!valid_transition("repairing", "ready"));
+        // The public transition command rejects "ready" even though the
+        // internal CI observer uses this state edge after matching GitHub SHA.
         assert!(!valid_transition("implementing", "ready"));
     }
 
