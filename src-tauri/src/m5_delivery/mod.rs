@@ -986,7 +986,7 @@ pub fn m5_github_failed_workflow_logs(worktree_id: String, number: u32) -> Resul
     git::validate_live(&store, &record)?;
     validate_number("pull request", number)?;
     let pull = github::read_pull_request(&record.marker.repository_slug, number)?;
-    let inspection = git::inspect_worktree(&store, &record)?;
+    let inspection = git::inspect_owned_worktree(&store, &record)?;
     if pull.get("isDraft").and_then(Value::as_bool) != Some(true)
         || pull.get("headRefOid").and_then(Value::as_str) != Some(inspection.head_oid.as_str())
         || pull.get("headRefName").and_then(Value::as_str) != Some(record.marker.branch.as_str())
