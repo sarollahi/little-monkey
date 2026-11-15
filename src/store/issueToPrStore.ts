@@ -103,7 +103,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         onProgress(current);
         const failingLocalChecks = current.checks.filter((check) => !check.passed)
           .map((check) => ({ label: check.label, command: check.command, code: check.code, output: check.outputExcerpt }));
-        const lastCi = current.ciHistory.at(-1);
+        const lastCi = current.ciHistory[current.ciHistory.length - 1];
         const reviewThreads = current.prNumber
           ? await githubReviewThreads(current.worktreeId, current.prNumber).catch(() => null)
           : null;
@@ -114,7 +114,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           failingLocalChecks,
           ciHead: lastCi?.headOid ?? null,
           ciVerdict: lastCi?.verdict ?? null,
-          ciChecks: lastCi?.checks.filter((check) => !["SUCCESS", "SKIPPED", "NEUTRAL"].includes(check.conclusion)) ?? [],
+          ciChecks: lastCi?.checks.filter((check: { conclusion: string }) => !["SUCCESS", "SKIPPED", "NEUTRAL"].includes(check.conclusion)) ?? [],
           failedActionsLogs: logs?.headRefOid === lastCi?.headOid ? logs?.logs : null,
           reviewThreads,
         }).slice(0, 12_000);
