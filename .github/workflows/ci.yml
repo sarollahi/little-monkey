@@ -198,6 +198,8 @@ jobs:
         run: |
           node --check scripts/first-run-acceptance.mjs
           node --test scripts/first-run-acceptance.contract.test.mjs
+          node --check scripts/first-run-live-e2e.mjs
+          node --test scripts/first-run-live-e2e.contract.test.mjs
           node scripts/first-run-acceptance.mjs baseline --output "$RUNNER_TEMP/little-monkey-first-run-baseline.json"
 
       - name: Upload real first-run baseline evidence
