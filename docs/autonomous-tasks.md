@@ -67,3 +67,69 @@ pnpm test:autonomous-eval:live -- --target ollama:<model>
 `scripts/autonomous-task-live-eval.mjs` creates a fresh broken Git repository, proves the baseline test fails, invokes the real `monkey task start` command with the selected model target, follows the durable run with `monkey task attach --follow`, then independently reruns the repository test and rejects changes to the protected test/instructions files. This is the model-facing acceptance probe; it requires a configured target and the normal resident-daemon/runtime prerequisites. Credential-free CI does not claim to have run it.
 
 Cross-process daemon and execution-target behavior is additionally covered by the Rust autonomous handoff and real Docker/runner E2E gates. Those tests remain separate because process ownership, runner recovery, and container transport cannot be proven by a TypeScript in-process fixture.
+
+## Issue-to-draft-PR CI verification and bounded repair
+
+The existing Issue-to-PR panel and Universal Autonomous Task coordinator share
+the owned Git worktree and `m5_delivery` approval boundary. Starting an issue
+requires an authenticated `gh` and a primary Git workspace whose GitHub
+remote matches the requested repository. The issue title, body, comments,
+review threads, and CI failure descriptions are **untrusted data**; none can
+expand the frozen workspace, permission scope, or mutation policy.
+
+The run targets the **actual named base branch** from the workspace, not a
+hard-coded `main`. Implementation stays inside the app-owned worktree.
+Configured repository `test`, `lint`, `typecheck`, and `build` scripts
+run through the existing verification command runner, with an inspected
+worktree fingerprint before and after verification. **No test scripts is
+not a pass**. The coordinator requires independent, non-mutating diff review
+with complete file coverage before the app enables Git delivery. Results,
+failed checks, review evidence, and the durable task link remain inspectable
+from the issue panel/run ledger.
+
+Git delivery is deliberately not autonomous: each owned-worktree commit,
+push, and draft PR creation/update requires a separately previewed, typed
+`m5_delivery` confirmation. Edits on a previously pushed draft PR are
+committed on the same owned branch and the existing PR is updated, never
+replaced or force-pushed. An ambiguous Git state fails closed.
+
+After the operator approves delivery, the panel polls GitHub's real
+`statusCheckRollup` every 30 seconds. Observations are persisted by exact
+PR head commit, deduplicated against repeated polls, and exposed in the
+nine-stage timeline. Missing checks, pending checks, unsuccessful checks,
+stale SHA responses, and changed PR ownership cannot be reported as ready.
+Failed checks feed a bounded repair through the existing autonomous task
+coordinator; after an independent review and new authoritative local checks,
+the operator must separately approve the new commit/push/update before CI
+is observed again. The default is **two repair attempts**; the operator can
+freeze a 0–5 limit before starting. Persisted attempts and CI evidence survive
+desktop restarts; a repair started before a crash is not counted twice.
+
+The timeline ends at **Ready**, which is a human publication boundary.
+There is no automatic merge, force-push, PR ready-for-review mutation, or
+review-thread resolution.
+
+### Deterministic acceptance and external prerequisites
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml issue_to_pr --lib
+pnpm test -- src/store/issueToPrStore.test.ts
+pnpm test
+```
+
+The Rust fixture `real_git_and_simulated_github_failing_ci_repairs_to_final_approval_boundary`
+creates a real Git repository, runs a failing subprocess check, makes an
+in-scope repair, reruns the check, rejects stale/pending simulated GitHub
+check observations, and reaches the `ready` boundary without publishing.
+The fixture exercises production status classification and transition
+checks, not a real provider, a GitHub API connection, or a real model.
+
+Live GitHub verification requires the operator's authenticated `gh` account
+and write access to the repo for push/PR mutations; an actual GitHub Actions
+run for the new draft PR is the authoritative remote acceptance test.
+The desktop must be running to continue polling: the Rust run record
+survives a daemon restart, but **unattended CI polling across a completely
+stopped desktop is not yet a daemon service**. Live model-backed CI repair,
+GitHub event webhook delivery, and a real provider's token/cost budget are
+not covered by the credential-free fixture. Do not claim these passed
+without separate evidence.
