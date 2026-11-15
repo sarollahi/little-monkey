@@ -164,7 +164,9 @@ export async function runIssueToPrAutonomousTask(
     },
   };
   const started = await startAutonomousTask({ objective: `Implement GitHub issue #${params.issueNumber}: ${params.issueTitle}`, sessionId: params.sessionId ?? null, constraints: { strategy: 'DELEGATE', source: 'issue', untrustedSource: true, allowExternalDelivery: true }, planningContext: { sourceMaterial: [wrapUntrustedContent('GitHub issue requirements', params.issueBody.slice(0, 12_000))] }, deliveryIntent: 'open_or_update_pr', deliveryTarget, runtime, signal: params.signal,
-    budgetSnapshot: { wallTimeMs: issuePolicy.agentWallTimeMs, maxRepairRounds: issuePolicy.maxRepairAttempts } });
+    // The persisted Issue-to-PR state machine owns the single repair counter.
+    // Disable per-task nested repairs to prevent exceeding the frozen limit.
+    budgetSnapshot: { wallTimeMs: issuePolicy.agentWallTimeMs, maxRepairRounds: 0 } });
   const result = await started.completion;
   const implementationResult = implementation as IssueToPrAgentResult | null;
   const verifiedTests = result.verificationEvidence.some((item) =>
