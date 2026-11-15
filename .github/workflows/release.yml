@@ -372,6 +372,18 @@ jobs:
           gh release download "$PREVIOUS" --dir previous --clobber || \
             echo "the previous release ($PREVIOUS) published nothing downloadable"
 
+      - name: Verify downloaded release artifact SHA-256 digests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          gh api "repos/${{ github.repository }}/releases/tags/$VERSION" > "$RUNNER_TEMP/release-assets.json"
+          node scripts/release-asset-integrity.mjs \
+            --metadata "$RUNNER_TEMP/release-assets.json" \
+            --artifacts artifacts
+
       - name: Clean install and upgrade smoke test
         shell: bash
         run: |
