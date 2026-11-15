@@ -330,14 +330,22 @@ describe("issueToPrStore", () => {
     expect(api.runIssueToPrChecks).not.toHaveBeenCalled();
   });
 
-  it("init never re-drives a run waiting on a human action (opening_pr or awaiting_review)", async () => {
+  it("init reconciles an existing remote draft without re-running coding, testing, or GitHub mutations", async () => {
     const openingPr = fixtureRun({ runId: "i2p-open", status: "opening_pr" });
     const awaitingReview = fixtureRun({ runId: "i2p-review", status: "awaiting_review" });
     api.listIssueToPrRuns.mockResolvedValue([openingPr, awaitingReview]);
+    api.reconcileIssueToPrPr.mockResolvedValue({
+      ...openingPr, status: "monitoring_ci", prNumber: 42,
+      prUrl: "https://github.com/owner/repo/pull/42",
+    });
 
     await useIssueToPrStore.getState().init();
-    await flush();
+    await flush(20);
 
+    expect(api.reconcileIssueToPrPr).toHaveBeenCalledExactlyOnceWith(openingPr.runId);
+    expect(useIssueToPrStore.getState().runs.find((run) => run.runId === openingPr.runId)).toMatchObject({
+      status: "monitoring_ci", prNumber: 42,
+    });
     expect(api.getIssueToPrStatus).not.toHaveBeenCalled();
     expect(api.runIssueToPrChecks).not.toHaveBeenCalled();
     expect(runner.runIssueToPrAgent).not.toHaveBeenCalled();
