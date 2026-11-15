@@ -192,15 +192,16 @@ export async function runIssueToPrAutonomousTask(
     && result.plan.nodes.some((node) => node.taskClass === 'review' && node.status === 'succeeded');
   const deliveryApprovalBoundary = result.outcome === 'WAITING_APPROVAL'
     && verifiedTests && independentReview && Boolean(planPassed);
-  if (deliveryApprovalBoundary && independentlyReviewed) {
-    await recordIssueToPrReview(params.runId, independentlyReviewed.revision, independentlyReviewed.files, independentlyReviewed.summary);
+  const reviewReceipt = independentlyReviewed as { revision: string; files: string[]; summary: string } | null;
+  if (deliveryApprovalBoundary && reviewReceipt) {
+    await recordIssueToPrReview(params.runId, reviewReceipt.revision, reviewReceipt.files, reviewReceipt.summary);
     await advanceIssueToPr(params.runId, 'opening_pr', {
       durableRunId: implementationResult?.durableRunId ?? result.taskId,
     });
   }
   return {
-    outcome: deliveryApprovalBoundary && independentlyReviewed ? 'completed' : result.outcome === 'CANCELLED' ? 'cancelled' : 'error',
-    summary: deliveryApprovalBoundary && independentlyReviewed
+    outcome: deliveryApprovalBoundary && reviewReceipt ? 'completed' : result.outcome === 'CANCELLED' ? 'cancelled' : 'error',
+    summary: deliveryApprovalBoundary && reviewReceipt
       ? 'Authoritative local verification and independent review passed; GitHub delivery requires typed approval.'
       : result.summary ?? 'Issue-to-PR task did not complete.',
     durableRunId: implementationResult?.durableRunId ?? result.taskId,
