@@ -85,7 +85,10 @@ Nothing reaches a runtime without passing the middle row. That is the whole desi
 
 The [release-readiness audit](docs/release-readiness-2026-11-15.md) and
 [physical acceptance procedure](docs/release-acceptance.md) identify which
-checks must pass before the next release. Development docs are not a claim
+checks must pass before the next release. Candidate package checks and an
+opt-in real-model/daemon first-run harness are available, but neither proves
+all operating systems and hardware configurations. Publication now requires
+an explicit manual run and acceptance sign-off rather than a push to `main`. Development docs are not a claim
 that the latest stable installer passed those checks. Startup/first-token/
 memory/task/cancellation numbers are shown **only** when recorded by an
 actual execution on identified hardware.
