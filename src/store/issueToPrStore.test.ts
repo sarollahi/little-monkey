@@ -16,6 +16,7 @@ const api = vi.hoisted(() => ({
 
 const runner = vi.hoisted(() => ({
   runIssueToPrAgent: vi.fn(),
+  runIssueToPrAutonomousTask: undefined as ReturnType<typeof vi.fn> | undefined,
 }));
 
 vi.mock("../lib/issueToPr", async (importOriginal) => ({
@@ -85,6 +86,7 @@ let capturedOnProgress: ((run: IssueToPrRun) => void) | null = null;
 beforeEach(() => {
   for (const mock of Object.values(api)) mock.mockReset();
   runner.runIssueToPrAgent.mockReset();
+  runner.runIssueToPrAutonomousTask = undefined;
   __resetIssueToPrControllersForTests();
   api.listenIssueToPrProgress.mockImplementation(async (onProgress: (run: IssueToPrRun) => void) => {
     capturedOnProgress = onProgress;
@@ -280,16 +282,38 @@ describe("issueToPrStore", () => {
     expect(api.runIssueToPrChecks).toHaveBeenCalledWith(run.runId);
   });
 
-  it("init re-runs checks (without re-invoking the agent) for a run left in checking, after reconfirming the point-in-time status", async () => {
+  it("init recovers a checked run through read-only review without replaying agent mutations", async () => {
+    const run = fixtureRun({ status: "checking" });
+    api.listIssueToPrRuns.mockResolvedValue([run]);
+    runner.runIssueToPrAutonomousTask = vi.fn().mockResolvedValue({
+      outcome: "completed", summary: "Reviewed the persisted owned diff.", durableRunId: run.runId,
+    });
+    api.getIssueToPrStatus.mockResolvedValueOnce(run).mockResolvedValue(fixtureRun({ status: "opening_pr" }));
+
+    await useIssueToPrStore.getState().init();
+    await flush(20);
+
+    expect(runner.runIssueToPrAutonomousTask).toHaveBeenCalledWith(expect.objectContaining({
+      runId: run.runId,
+      resumeReviewOnly: true,
+      worktreeId: run.worktreeId,
+    }));
+    expect(runner.runIssueToPrAgent).not.toHaveBeenCalled();
+    expect(api.runIssueToPrChecks).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass independent review if the coordinator is unavailable after restart", async () => {
     const run = fixtureRun({ status: "checking" });
     api.listIssueToPrRuns.mockResolvedValue([run]);
     api.getIssueToPrStatus.mockResolvedValue(run);
 
     await useIssueToPrStore.getState().init();
-    await flush();
+    await flush(20);
 
-    expect(api.getIssueToPrStatus).toHaveBeenCalledWith(run.runId);
-    expect(api.runIssueToPrChecks).toHaveBeenCalledWith(run.runId);
+    expect(api.advanceIssueToPr).toHaveBeenCalledWith(run.runId, "failed", expect.objectContaining({
+      error: expect.stringContaining("Independent review coordinator unavailable"),
+    }));
+    expect(api.runIssueToPrChecks).not.toHaveBeenCalled();
     expect(runner.runIssueToPrAgent).not.toHaveBeenCalled();
   });
 
