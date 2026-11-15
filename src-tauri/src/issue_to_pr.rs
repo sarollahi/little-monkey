@@ -563,6 +563,11 @@ pub fn issue_to_pr_advance(
             run.status
         ));
     }
+    if run.status == "checking" && status == "opening_pr"
+        && (run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0)))
+    {
+        return Err("Cannot authorize PR delivery without successful repository checks".to_string());
+    }
     run.status = status;
     if let Some(error) = error {
         run.error = Some(error);
@@ -666,7 +671,8 @@ pub async fn issue_to_pr_run_checks(
     let mut run = require_run(&runs, &run_id)?;
     run.checks = outcomes;
     run.status = if all_passed {
-        "opening_pr".to_string()
+        // Do not expose Git delivery before the independent diff review finishes.
+        "checking".to_string()
     } else if run.repair_attempts < run.max_repair_attempts {
         "repairing".to_string()
     } else {
