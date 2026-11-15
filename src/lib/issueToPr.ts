@@ -131,6 +131,9 @@ export const beginIssueToPrRepair = (runId: string) =>
 export const setIssueToPrRepairLimit = (runId: string, maxAttempts: number) =>
   invoke<IssueToPrRun>("issue_to_pr_set_repair_limit", { runId, maxAttempts });
 
+export const reconcileIssueToPrPr = (runId: string) =>
+  invoke<IssueToPrRun>("issue_to_pr_reconcile_pr", { runId });
+
 export const issueToPrWorktreeRevision = (runId: string) =>
   invoke<string>("issue_to_pr_worktree_revision", { runId });
 
