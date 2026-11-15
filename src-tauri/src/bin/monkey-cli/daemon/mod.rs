@@ -2645,7 +2645,7 @@ fn parse_params(values: &[String]) -> Result<HashMap<String, String>, String> {
 /// An accepted-but-not-queued row is not silently replaced with an older turn.
 fn session_run(paths: &DaemonPaths, source: &str, session_id: &str) -> Result<String, String> {
     use little_monkey_lib::channels::ingress::ConversationSource;
-    if session_id.is_empty() || session_id.len() > 256 || session_id.contains('\\0') {
+    if session_id.is_empty() || session_id.len() > 256 || session_id.contains('\0') {
         return Err("Invalid session identifier".into());
     }
     let source = ConversationSource::parse(source)

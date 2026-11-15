@@ -510,7 +510,10 @@ describe("daemon desktop routing and event replay", () => {
       sequence: 2,
       event: { type: "cancelled", payload: { reason: "Stopped from desktop chat" } },
     } as RunEventEnvelopeWire;
-    mocks.loadRunEvents.mockResolvedValue([cancelled]);
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 1, event: { type: "queued", payload: { queue: "fixture" } } },
+      cancelled,
+    ] as RunEventEnvelopeWire[]);
     mocks.getRun.mockResolvedValue({ status: "cancelled" } as RunRecord);
     const controller = new AbortController();
     controller.abort();

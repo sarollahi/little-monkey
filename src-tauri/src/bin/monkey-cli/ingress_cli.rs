@@ -333,7 +333,7 @@ fn resume(
 pub fn list(source: Option<&str>, account: Option<&str>, recoverable: bool, limit: u32, json: bool) -> Result<(), String> {
     let filter = source.map(parse_source).transpose()?;
     if let Some(account) = account {
-        if account.is_empty() || account.len() > 256 || account.contains('\\0') {
+        if account.is_empty() || account.len() > 256 || account.contains('\0') {
             return Err("Invalid session/account identifier".into());
         }
     }
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn an_unknown_source_filter_is_refused_before_anything_is_read() {
-        assert!(list(Some("carrier pigeon"), 10, true)
+        assert!(list(Some("carrier pigeon"), None, false, 10, true)
             .expect_err("unknown source")
             .contains("carrier pigeon"));
     }

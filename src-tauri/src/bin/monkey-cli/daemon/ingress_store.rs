@@ -350,7 +350,10 @@ impl DaemonStore {
         let rows = statement.query_map(
             rusqlite::params_from_iter(values.iter()), read_ingress_turn,
         ).map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect::<Result<Vec<_>, String>>()
     }
 
     /// In-flight desktop sessions in the existing admission and job tables.
@@ -368,7 +371,10 @@ impl DaemonStore {
         )).map_err(|error| error.to_string())?;
         let rows = statement.query_map([i64::from(limit.clamp(1, 2000))], read_ingress_turn)
             .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect::<Result<Vec<_>, String>>()
     }
 
     /// Recent turns across every origin, newest first. No message text.
