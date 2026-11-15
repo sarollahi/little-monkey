@@ -286,7 +286,7 @@ fn detect_check_commands(root: &Path) -> Result<Vec<(String, String)>, String> {
     let manager = detect_package_manager(root);
     let mut commands = Vec::new();
     if let Some(scripts) = value.get("scripts").and_then(Value::as_object) {
-        for name in ["test", "build"] {
+        for name in ["test", "lint", "typecheck", "build"] {
             if scripts.contains_key(name) {
                 commands.push((name.to_string(), format!("{manager} run {name}")));
             }
@@ -689,6 +689,189 @@ pub async fn issue_to_pr_run_checks(
 /// This only marks the RUN cancelled — the frontend's own `AbortController`
 /// for the in-flight headless turn (if any) is separately wired to the same
 /// button; see `issueToPrStore.ts`.
+// All verdicts are computed from GitHub's actual check/status API output.
+// Model-generated summaries, missing checks, and pending jobs never mean success.
+fn classify_ci_rollup(value: &Value) -> Result<(String, Vec<CiCheckEvidence>), String> {
+    let entries = value.get("statusCheckRollup").and_then(Value::as_array)
+        .ok_or_else(|| "GitHub did not return a statusCheckRollup array".to_string())?;
+    if entries.len() > 512 {
+        return Err("GitHub returned too many CI checks".to_string());
+    }
+    let mut checks = Vec::new();
+    let mut failed = false;
+    let mut pending = entries.is_empty();
+    let mut success_count = 0usize;
+    for entry in entries {
+        let name = entry.get("name").or_else(|| entry.get("context"))
+            .and_then(Value::as_str).unwrap_or("unnamed").chars().take(160).collect();
+        let state = entry.get("status").or_else(|| entry.get("state"))
+            .and_then(Value::as_str).unwrap_or("UNKNOWN").to_ascii_uppercase();
+        let conclusion = entry.get("conclusion").or_else(|| entry.get("state"))
+            .and_then(Value::as_str).unwrap_or("PENDING").to_ascii_uppercase();
+        let url = entry.get("detailsUrl").or_else(|| entry.get("targetUrl"))
+            .and_then(Value::as_str).filter(|url| url.starts_with("https://github.com/"))
+            .map(|url| bounded(url, 1024));
+        let result = match conclusion.as_str() {
+            "SUCCESS" if state == "COMPLETED" || state == "SUCCESS" => {
+                success_count += 1;
+                "pass"
+            }
+            "SKIPPED" | "NEUTRAL" if state == "COMPLETED" => "skip",
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" |
+            "CANCELLED" | "STARTUP_FAILURE" => {
+                failed = true;
+                "fail"
+            }
+            _ => {
+                pending = true;
+                "pending"
+            }
+        };
+        checks.push(CiCheckEvidence {
+            name,
+            state,
+            conclusion: if result == "pending" { "PENDING".to_string() } else { conclusion },
+            url,
+        });
+    }
+    let verdict = if failed {
+        "failed"
+    } else if pending || success_count == 0 {
+        "pending"
+    } else {
+        "passed"
+    };
+    Ok((verdict.to_string(), checks))
+}
+
+#[tauri::command]
+pub fn issue_to_pr_set_repair_limit(
+    app: AppHandle,
+    run_id: String,
+    max_attempts: u32,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    if max_attempts > 5 {
+        return Err("Repair limit must be between 0 and 5".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path);
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "planning" || run.repair_attempts != 0 {
+        return Err("Repair policy is frozen after planning".to_string());
+    }
+    run.max_repair_attempts = max_attempts;
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// A repair attempt has an idempotent start marker. After a process crash the
+/// same attempt resumes without consuming an additional budget unit.
+#[tauri::command]
+pub fn issue_to_pr_begin_repair(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path);
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "repairing" {
+        return Err("Only a run with failed verification may begin repair".to_string());
+    }
+    if !run.repair_in_progress {
+        if run.repair_attempts >= run.max_repair_attempts {
+            return Err("Repair attempt limit exhausted".to_string());
+        }
+        run.repair_attempts += 1;
+        run.repair_in_progress = true;
+    }
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// Read-only CI polling is fenced to the actual, still-owned draft PR head.
+/// Unknown statuses and absent checks remain pending. No model result can
+/// change CI to ready. Only a completed GitHub check rollup can do that.
+#[tauri::command]
+pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path);
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "monitoring_ci" && run.status != "ready" {
+        return Err("CI monitoring requires an owned draft PR awaiting checks".to_string());
+    }
+    let number = run.pr_number.ok_or_else(|| "Missing draft PR number".to_string())?;
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    if inspection.worktree.marker.branch != run.branch
+        || inspection.worktree.marker.repository_slug != run.repository_slug
+        || inspection.dirty
+    {
+        return Err("Worktree ownership changed or local files are dirty; CI evidence is stale".to_string());
+    }
+    let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
+    if pr.get("isDraft").and_then(Value::as_bool) != Some(true)
+        || pr.get("state").and_then(Value::as_str) != Some("OPEN")
+        || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
+        || (run.base_ref != "HEAD"
+            && pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str()))
+    {
+        return Err("PR identity, draft state, or base branch no longer matches the frozen run".to_string());
+    }
+    let head_oid = pr.get("headRefOid").and_then(Value::as_str)
+        .ok_or_else(|| "GitHub did not return the draft PR head".to_string())?;
+    if inspection.head_oid != head_oid {
+        return Err("Draft PR head differs from the owned local branch; manual reconciliation required".to_string());
+    }
+    let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
+    if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid) {
+        return Err("GitHub CI snapshot is for a stale PR head".to_string());
+    }
+    let (mut verdict, checks) = classify_ci_rollup(&rollup)?;
+    if verdict == "passed" && (run.checks.is_empty() || !run.checks.iter().all(|c| c.passed && c.code == Some(0))) {
+        verdict = "pending".to_string();
+    }
+    let observation = CiObservation {
+        head_oid: head_oid.to_string(),
+        verdict: verdict.clone(),
+        checks,
+        observed_at_ms: now_ms()?,
+    };
+    // Deduplicate repeated GitHub event deliveries and polls by SHA + verdict + check details.
+    let repeated = run.ci_history.last().map(|last|
+        last.head_oid == observation.head_oid
+        && last.verdict == observation.verdict
+        && last.checks == observation.checks
+    ).unwrap_or(false);
+    if !repeated {
+        run.ci_history.push(observation);
+        if run.ci_history.len() > CI_HISTORY_CAP {
+            run.ci_history.remove(0);
+        }
+    }
+    run.ci_head_oid = Some(head_oid.to_string());
+    run.status = match verdict.as_str() {
+        "passed" => "ready",
+        "failed" if run.repair_attempts < run.max_repair_attempts => "repairing",
+        "failed" => "failed",
+        _ => "monitoring_ci",
+    }.to_string();
+    if verdict == "failed" {
+        run.error = Some("GitHub CI failed on the current owned head; investigate failed checks before a bounded repair.".to_string());
+    } else if verdict == "passed" {
+        run.error = None;
+    }
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
 #[tauri::command]
 pub fn issue_to_pr_cancel(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
@@ -754,6 +937,11 @@ mod tests {
             pr_number: None,
             pr_url: None,
             checks: Vec::new(),
+            ci_history: Vec::new(),
+            ci_head_oid: None,
+            repair_attempts: 0,
+            max_repair_attempts: MAX_REPAIR_ATTEMPTS,
+            repair_in_progress: false,
             error: None,
             durable_run_id: None,
             created_at_ms,
