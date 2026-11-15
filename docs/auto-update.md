@@ -71,8 +71,9 @@ a fault that was about to be fixed.
 
 Signing is set up: the keypair exists, `plugins.updater.pubkey` holds the
 public half, and the published 1.10.0 release includes `latest.json` and
-signed updater artifacts. Publishing is automatic — the `publish` job flips
-the draft once every matrix target has uploaded.
+signed updater artifacts. Publishing now requires an explicitly approved **manual** Release workflow run
+on the `main` branch with a reviewed acceptance-evidence URL. After approval,
+the `publish` job flips the draft only once all required build/smoke jobs pass.
 
 To (re)do the setup from scratch:
 
@@ -98,7 +99,11 @@ To (re)do the setup from scratch:
    (`includeUpdaterJson: true`). A missing password secret fails the signing
    step, so both are required.
 
-4. Nothing. Publishing is automated. `tauri-action` still creates the release
+4. After reviewing real install/model/upgrade acceptance, manually run the
+   **Release** GitHub Actions workflow on `main`, check `approve_publish`,
+   and provide a URL to that reviewed acceptance report. Merely setting the
+   flag or providing a URL is an attestation, not automated proof of tests.
+   `tauri-action` still creates the release
    as a draft (`releaseDraft: true`), because six matrix jobs write to one
    release and publishing from inside the matrix would expose whichever
    platform finished first along with an incomplete `latest.json`. The
