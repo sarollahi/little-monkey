@@ -186,6 +186,11 @@ jobs:
         timeout-minutes: 8
         run: pnpm test:browser-policy
 
+      - name: Release asset integrity contracts (offline, real digests)
+        run: |
+          node --check scripts/release-asset-integrity.mjs
+          node --test scripts/release-asset-integrity.test.mjs
+
       - name: First-run acceptance fixture and honest evidence contracts
         # Runs the deliberately failing baseline as an EXPECTED baseline, plus
         # real temporary Git checkouts for repaired/out-of-scope scenarios.
