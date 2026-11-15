@@ -142,6 +142,9 @@ jobs:
           node scripts/swarm-repository-repair-live-acceptance.mjs --self-check
           node --test scripts/swarm-repository-repair-acceptance.contract.test.mjs
 
+      - name: Issue-to-PR autonomous runner, restart recovery, and token budget regressions
+        run: pnpm exec vitest run src/lib/issueToPrRunner.test.ts src/store/issueToPrStore.test.ts src/components/IssueToPr/IssueToPrTimeline.test.ts src/lib/headlessAgentRunner.test.ts
+
       - name: Production build and bundle budget
         run: pnpm build:budget
 
