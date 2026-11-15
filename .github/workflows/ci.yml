@@ -423,7 +423,7 @@ jobs:
             # test threads negotiate Secret Service sessions concurrently,
             # invalidating the session DBus connection for both tests.
             # Run every test (not a skip) serially against this real daemon.
-            RUST_TEST_THREADS=1 pnpm test:rust
+            # Channel-agent E2E tests spawn the real CLI binary. Build it first;\n            # `cargo test` alone produces a test harness, not the executable.\n            cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli\n            RUST_TEST_THREADS=1 pnpm test:rust
             # Three ACTUAL independently running daemon installations over
             # signed/pinned TLS on loopback, private SQLite and OS keychain.
             # This test owns only disposable GitHub-hosted runner state.
@@ -437,6 +437,10 @@ jobs:
               > "$RUNNER_TEMP/native-swarm-three-process-acceptance.json"
             cat "$RUNNER_TEMP/native-swarm-three-process-acceptance.json"
           '
+
+      - name: Build executable for cross-platform daemon E2E
+        if: ${{ !startsWith(matrix.os, 'ubuntu') }}
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
 
       - name: Rust tests
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
