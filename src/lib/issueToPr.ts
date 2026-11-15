@@ -9,6 +9,9 @@ export type IssueToPrStatus =
   | "checking"
   | "opening_pr"
   | "awaiting_review"
+  | "monitoring_ci"
+  | "repairing"
+  | "ready"
   | "done"
   | "failed"
   | "cancelled";
@@ -19,6 +22,20 @@ export interface IssueToPrCheckOutcome {
   passed: boolean;
   code: number | null;
   outputExcerpt: string;
+}
+
+export interface IssueToPrCiCheck {
+  name: string;
+  state: string;
+  conclusion: string;
+  url: string | null;
+}
+
+export interface IssueToPrCiObservation {
+  headOid: string;
+  verdict: "pending" | "failed" | "passed";
+  checks: IssueToPrCiCheck[];
+  observedAtMs: number;
 }
 
 export interface IssueToPrRun {
@@ -36,6 +53,11 @@ export interface IssueToPrRun {
   prNumber: number | null;
   prUrl: string | null;
   checks: IssueToPrCheckOutcome[];
+  ciHistory: IssueToPrCiObservation[];
+  ciHeadOid: string | null;
+  repairAttempts: number;
+  maxRepairAttempts: number;
+  repairInProgress: boolean;
   error: string | null;
   durableRunId: string | null;
   createdAtMs: number;
@@ -86,6 +108,15 @@ export const advanceIssueToPr = (
 
 export const runIssueToPrChecks = (runId: string) =>
   invoke<IssueToPrRun>("issue_to_pr_run_checks", { runId });
+
+export const pollIssueToPrCi = (runId: string) =>
+  invoke<IssueToPrRun>("issue_to_pr_poll_ci", { runId });
+
+export const beginIssueToPrRepair = (runId: string) =>
+  invoke<IssueToPrRun>("issue_to_pr_begin_repair", { runId });
+
+export const setIssueToPrRepairLimit = (runId: string, maxAttempts: number) =>
+  invoke<IssueToPrRun>("issue_to_pr_set_repair_limit", { runId, maxAttempts });
 
 export function listenIssueToPrProgress(
   onProgress: (run: IssueToPrRun) => void,
