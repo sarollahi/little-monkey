@@ -27,6 +27,7 @@ import { useIssueToPrStore } from "../../store/issueToPrStore";
 import { useSpecScorerStore } from "../../store/specScorerStore";
 import { Button, IconButton, StatusPill, type PillTone } from "../ui";
 import { errorMessage } from "../../lib/errors";
+import { IssueToPrTimeline } from "./IssueToPrTimeline";
 import { statusTone as sharedStatusTone } from "../../lib/statusTone";
 
 interface IssueToPrPanelProps {
@@ -158,6 +159,7 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
   const { t } = useT();
   const store = useIssueToPrStore();
   const [issueUrl, setIssueUrl] = useState("");
+  const [maxRepairAttempts, setMaxRepairAttempts] = useState(2);
 
   useEffect(() => {
     void store.init();
@@ -214,7 +216,7 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
         onSubmit={(event) => {
           event.preventDefault();
           if (!issueUrl.trim() || starting) return;
-          void store.start(issueUrl.trim()).then(() => setIssueUrl(""));
+          void store.start(issueUrl.trim(), maxRepairAttempts).then(() => setIssueUrl(""));
         }}
       >
         <label className="min-w-64 flex-1 text-xs text-muted">
@@ -225,6 +227,12 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
             value={issueUrl}
             onChange={(event) => setIssueUrl(event.target.value)}
           />
+        </label>
+        <label className="text-xs text-muted">
+          Max repairs
+          <select aria-label="Maximum CI repair attempts" className="mt-1 block rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground" value={maxRepairAttempts} onChange={(event) => setMaxRepairAttempts(Number(event.target.value))}>
+            {[0, 1, 2, 3, 4, 5].map((count) => <option key={count} value={count}>{count}</option>)}
+          </select>
         </label>
         <Button type="submit" variant="primary" disabled={starting || !issueUrl.trim()}>
           {starting ? <Loader2 className="animate-spin" size={14} /> : <Play size={14} />} {t("IssueToPr.startButton")}
@@ -357,6 +365,8 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
                 </p>
               )}
 
+              <IssueToPrTimeline run={selected} />
+
               {selected.checks.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold text-foreground">{t("IssueToPr.checksHeading")}</h4>
@@ -402,14 +412,16 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
                     <Square size={13} /> {t("IssueToPr.cancelButton")}
                   </Button>
                 )}
-                {selected.status === "awaiting_review" && selected.prUrl && (
+                {["awaiting_review", "monitoring_ci", "ready", "done"].includes(selected.status) && selected.prUrl && (
                   <>
                     <Button size="sm" onClick={() => window.open(selected.prUrl ?? undefined, "_blank", "noopener,noreferrer")}>
                       <ExternalLink size={13} /> {t("IssueToPr.openPrLinkButton")}
                     </Button>
-                    <Button size="sm" variant="primary" disabled={store.busy[`done:${selected.runId}`]} onClick={() => void store.markDone(selected.runId)}>
-                      <CheckCircle2 size={13} /> {t("IssueToPr.markDoneButton")}
-                    </Button>
+                    {(selected.status === "ready" || selected.status === "awaiting_review") && (
+                      <Button size="sm" variant="primary" disabled={store.busy[`done:${selected.runId}`]} onClick={() => void store.markDone(selected.runId)}>
+                        <CheckCircle2 size={13} /> {t("IssueToPr.markDoneButton")}
+                      </Button>
+                    )}
                   </>
                 )}
                 {selected.durableRunId && onOpenRunCapsule && (
@@ -475,6 +487,9 @@ function statusLabelSuffix(status: IssueToPrStatus): string {
     case "checking": return "Checking";
     case "opening_pr": return "OpeningPr";
     case "awaiting_review": return "AwaitingReview";
+    case "monitoring_ci": return "MonitoringCi";
+    case "repairing": return "Repairing";
+    case "ready": return "Ready";
     case "done": return "Done";
     case "failed": return "Failed";
     case "cancelled": return "Cancelled";
