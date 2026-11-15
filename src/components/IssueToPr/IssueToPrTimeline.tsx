@@ -8,7 +8,7 @@ export function issueToPrStages(run: IssueToPrRun): Stage[] {
   const testsPassed = run.checks.length > 0 && run.checks.every((check) => check.passed && check.code === 0);
   const testsFailed = run.checks.some((check) => !check.passed || check.code !== 0);
   const reviewed = Boolean(run.reviewEvidence && run.reviewEvidence.filesReviewed.length > 0);
-  const ci = run.ciHistory?.at(-1);
+  const ci = run.ciHistory.length ? run.ciHistory[run.ciHistory.length - 1] : undefined;
   const ciVerified = Boolean(ci && ci.verdict === "passed" && ci.headOid === run.ciHeadOid);
   const codingComplete = ["checking", "opening_pr", "awaiting_review", "monitoring_ci", "repairing", "ready", "done"].includes(phase)
     || (phase === "failed" && run.checks.length > 0);
