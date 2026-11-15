@@ -214,6 +214,10 @@ export const githubReviewThreads = (worktreeId: string, number: number) =>
 export const githubChecks = (worktreeId: string, number: number) =>
   invoke<Record<string, unknown>>("m5_github_checks", { worktreeId, number });
 
+/** Read-only, owned-PR-fenced failed Actions logs from authenticated gh. */
+export const githubFailureLogs = (worktreeId: string, number: number) =>
+  invoke<{ headRefOid: string; logs: Array<{ name: string; runId?: number; log: string }> }>("m5_github_failed_workflow_logs", { worktreeId, number });
+
 export const reviewPullRequest = (worktreeId: string, prNumber: number, model: string) =>
   invoke<ReviewReport>("m5_review_pull_request", { request: { worktreeId, prNumber, model } });
 
