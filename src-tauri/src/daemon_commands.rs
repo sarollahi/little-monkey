@@ -5574,7 +5574,7 @@ pub async fn peers_memory_sync(alias:String,namespace:String) -> Result<Value,St
 /// the answer has the same shape. The listing carries identifiers, state and
 /// failure reasons — never message text, and never a credential.
 #[tauri::command]
-pub async fn ingress_turns(source: Option<String>, limit: u32) -> Result<Value, String> {
+pub async fn ingress_turns(source: Option<String>, account: Option<String>, limit: u32) -> Result<Value, String> {
     let mut args = vec!["ingress".into(), "list".into()];
     if let Some(source) = source {
         // Parsed against the enum rather than pattern-checked, so the only
@@ -5584,6 +5584,11 @@ pub async fn ingress_turns(source: Option<String>, limit: u32) -> Result<Value, 
             .ok_or_else(|| format!("Unknown conversation source '{source}'"))?;
         args.push("--source".into());
         args.push(source.as_str().to_string());
+    }
+    if let Some(account) = account {
+        validate_id("ingress session/account", &account)?;
+        args.push("--account".into());
+        args.push(account);
     }
     args.push("--limit".into());
     args.push(limit.clamp(1, 200).to_string());

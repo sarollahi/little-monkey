@@ -96,8 +96,13 @@ export const SOURCE_LABELS: Record<ConversationSource, string> = {
   telephone: "Phone",
 };
 
-export const ingressTurns = (source: ConversationSource | null = null, limit = 20) =>
-  invoke<{ turns: IngressTurn[] }>("ingress_turns", { source, limit });
+/** Filter at the durable SQLite source; never fetch a global page then filter it
+ * client-side, since unrelated paired clients can fill that page. */
+export const ingressTurns = (
+  source: ConversationSource | null = null,
+  limit = 20,
+  account: string | null = null,
+) => invoke<{ turns: IngressTurn[] }>("ingress_turns", { source, account, limit });
 
 /** One turn, by the identity its origin submitted it under, with its
  * continuations. How a surface watching a turn learns that the run answering

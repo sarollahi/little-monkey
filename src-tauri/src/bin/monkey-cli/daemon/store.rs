@@ -2523,6 +2523,16 @@ CREATE INDEX IF NOT EXISTS channel_outbound_echo_age_idx
     ON channel_outbound_echo(account_id, sent_at_ms DESC);
 "#;
 
+// Session attachment reads the same accepted-turn rows that own durable
+// admission. The index makes an exact source+session lookup independent of
+// traffic from other clients; no second session table is introduced.
+const DAEMON_V21: i64 = 21;
+const DAEMON_V21_CHECKSUM: &str = "daemon-v21-session-scoped-ingress-index-2026-11-15";
+const DAEMON_V21_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS ingress_turns_session_attachment_idx
+ON ingress_turns(source, source_account_id, created_at_ms DESC, ingress_id DESC);
+"#;
+
 /// Every migration in order, so applying them is a loop rather than a stanza per
 /// version. Mirrors the shape `denial_sink` and the run ledger already use, and
 /// pays off the debt `DaemonEngine::recover`'s comment flagged: before this,
@@ -2554,12 +2564,13 @@ const DAEMON_MIGRATIONS: &[(i64, &str, &str)] = &[
     (DAEMON_V18, DAEMON_V18_CHECKSUM, DAEMON_V18_SQL),
     (DAEMON_V19, DAEMON_V19_CHECKSUM, DAEMON_V19_SQL),
     (DAEMON_V20, DAEMON_V20_CHECKSUM, DAEMON_V20_SQL),
+    (DAEMON_V21, DAEMON_V21_CHECKSUM, DAEMON_V21_SQL),
 ];
 
 /// Latest version this build understands. The forward-only guard compares
 /// against this rather than a specific version, so adding V4 needs no edit
 /// there.
-const DAEMON_LATEST: i64 = DAEMON_V20;
+const DAEMON_LATEST: i64 = DAEMON_V21;
 
 /// Active states, spelled once. A reservation is held for exactly as long as the
 /// job is in one of them, which is what releases it on any exit path — clean,

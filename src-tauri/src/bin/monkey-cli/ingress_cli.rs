@@ -22,6 +22,9 @@ pub enum IngressCmd {
         /// telephone.
         #[arg(long)]
         source: Option<String>,
+        /// Exact source account/session; filtering occurs before pagination.
+        #[arg(long)]
+        account: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: u32,
         #[arg(long)]
@@ -74,9 +77,10 @@ pub fn dispatch(command: &IngressCmd) -> Result<(), String> {
     match command {
         IngressCmd::List {
             source,
+            account,
             limit,
             json,
-        } => list(source.as_deref(), *limit, *json),
+        } => list(source.as_deref(), account.as_deref(), *limit, *json),
         IngressCmd::Show {
             source,
             account,
@@ -322,20 +326,16 @@ fn resume(
     Ok(())
 }
 
-pub fn list(source: Option<&str>, limit: u32, json: bool) -> Result<(), String> {
-    let filter = match source {
-        Some(value) => Some(
-            ConversationSource::parse(value)
-                .ok_or_else(|| format!("Unknown conversation source '{value}'"))?,
-        ),
-        None => None,
-    };
+pub fn list(source: Option<&str>, account: Option<&str>, limit: u32, json: bool) -> Result<(), String> {
+    let filter = source.map(parse_source).transpose()?;
+    if let Some(account) = account {
+        if account.is_empty() || account.len() > 256 || account.contains('\\0') {
+            return Err("Invalid session/account identifier".into());
+        }
+    }
     let store = DaemonStore::open(&DaemonPaths::resolve()?)?;
-    let turns: Vec<StoredIngressTurn> = store
-        .recent_ingress_turns(limit.clamp(1, 200))?
-        .into_iter()
-        .filter(|turn| filter.is_none_or(|source| turn.source == source))
-        .collect();
+    let turns: Vec<StoredIngressTurn> =
+        store.recent_ingress_turns_filtered(filter, account, limit)?;
 
     if json {
         let rows: Vec<serde_json::Value> = turns

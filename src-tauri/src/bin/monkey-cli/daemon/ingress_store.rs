@@ -312,23 +312,33 @@ impl DaemonStore {
         }))
     }
 
-    /// Recent turns across every origin, newest first. The read model behind
-    /// the typed bridge: identifiers and status, never message text.
+    /// Recent accepted turns, filtered in SQLite before applying the limit.
+    /// A local observer can resolve its session even when unrelated devices
+    /// produced more than a page of newer turns. This is a read-only view of
+    /// the existing admission records; it never acquires execution authority.
+    pub fn recent_ingress_turns_filtered(
+        &self,
+        source: Option<ConversationSource>,
+        account: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredIngressTurn>, String> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns
+             WHERE (?1 IS NULL OR source=?1)
+               AND (?2 IS NULL OR source_account_id=?2)
+             ORDER BY created_at_ms DESC, ingress_id DESC LIMIT ?3"
+        )).map_err(|error| error.to_string())?;
+        let rows = statement.query_map(
+            params![source.map(|value| value.as_str().to_string()), account,
+                    i64::from(limit.clamp(1, 200))],
+            read_ingress_turn,
+        ).map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    }
+
+    /// Recent turns across every origin, newest first. No message text.
     pub fn recent_ingress_turns(&self, limit: u32) -> Result<Vec<StoredIngressTurn>, String> {
-        let mut statement = self
-            .connection
-            .prepare(&format!(
-                "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns
-                 ORDER BY created_at_ms DESC LIMIT ?1"
-            ))
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([i64::from(limit)], read_ingress_turn)
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .collect()
+        self.recent_ingress_turns_filtered(None, None, limit)
     }
 
     /// Whether the frozen route that produced a job said its run may answer
@@ -671,6 +681,33 @@ mod tests {
             RouteTarget::new("chat"),
             NOW,
         )
+    }
+
+    #[test]
+    fn session_scoped_attachment_filters_before_limiting() {
+        let mut store = DaemonStore::open_in_memory().expect("open");
+        store.accept_ingress_turn(
+            &ingress(ConversationSource::Desktop, "original"), &[], NOW
+        ).expect("original accepted");
+        // Later traffic from other clients must not evict this session from
+        // the page of one row that the desktop recovery request asks for.
+        for n in 0..210 {
+            let mut other = ingress(ConversationSource::Desktop, &format!("other-{n}"));
+            other.source_account_id = "another-session".into();
+            store.accept_ingress_turn(&other, &[], NOW + 1 + n)
+                .expect("other accepted");
+        }
+        let own = store.recent_ingress_turns_filtered(
+            Some(ConversationSource::Desktop), Some("acct-1"), 1
+        ).expect("scoped read");
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].source_event_id, "original");
+        assert!(store.recent_ingress_turns_filtered(
+            Some(ConversationSource::Voice), Some("acct-1"), 1
+        ).unwrap().is_empty());
+        assert!(store.recent_ingress_turns_filtered(
+            Some(ConversationSource::Desktop), Some("another-session"), 1
+        ).unwrap().len() == 1);
     }
 
     #[test]
