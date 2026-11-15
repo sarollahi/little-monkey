@@ -93,7 +93,7 @@ test("recorded baseline SHA still verifies edits after an agent commits them", (
   writeFileSync(impl, readFileSync(impl, "utf8").replace("replaceAll(' ', '-')", "replace(/\\s+/g, '-')"));
   const suite = join(dir, "normalize.test.mjs");
   writeFileSync(suite, readFileSync(suite, "utf8") +
-    "\\ntest('tabs collapse', () => { assert.equal(normalizeUserId('Ada\\\\tLovelace'), 'ada-lovelace'); });\\n");
+    "\ntest('tabs collapse', () => { assert.equal(normalizeUserId('Ada\\tLovelace'), 'ada-lovelace'); });\n");
   assert.equal(run("git", ["add", "normalize.mjs", "normalize.test.mjs"], dir).status, 0);
   assert.equal(run("git", ["commit", "-qm", "agent committed the fix"], dir).status, 0);
   const { result, evidence } = invoke(dir, "verify", "after.json", ["--base", baseline.sourceCommit]);
