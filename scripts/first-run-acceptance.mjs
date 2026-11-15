@@ -93,6 +93,13 @@ function main() {
     : test.exitCode === 0 && summary.tests >= 3 && summary.failed === 0;
 
   if (mode === "baseline") {
+    // Capture the immutable baseline *before* the agent can commit anything.
+    // Git HEAD after an autonomous task may differ, so "diff HEAD" alone can
+    // silently lose every real change an agent already committed.
+    const baselineHead = git(["rev-parse", "--verify", "HEAD"]);
+    if (baselineHead.exitCode === 0 && /^[a-f0-9]{40}$/.test(baselineHead.stdout.trim())) {
+      evidence.sourceCommit = baselineHead.stdout.trim();
+    }
     evidence.outcome = evidence.checks.fixtureTests ? "EXPECTED_BASELINE_FAILURE" : "FAIL";
     save(evidence);
     return;
