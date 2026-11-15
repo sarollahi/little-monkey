@@ -919,13 +919,11 @@ function App() {
     };
   }, []);
 
-  // Rebind persisted chat placeholders to the daemon's shared run ledger
-  // after a WebView/app restart. Only the main window owns recovery so two
-  // session windows never race to render the same durable event stream.
+  // Each window may observe an existing daemon-owned turn. Recovery is now
+  // read-only and the daemon alone owns execution, so a secondary session
+  // window cannot start a duplicate tool merely by attaching to the ledger.
   useEffect(() => {
-    if (isTauri() && getCurrentWindow().label === "main") {
-      recoverDaemonDesktopTurns();
-    }
+    if (isTauri()) recoverDaemonDesktopTurns();
   }, []);
 
   // Local App Builder (ROADMAP.md, Phase 3): a published app's static page
