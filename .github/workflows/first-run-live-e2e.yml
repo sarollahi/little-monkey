@@ -1,0 +1,98 @@
+name: First-run real-model acceptance (manual, no release)
+
+# Opt-in only. Requires a self-hosted runner with the *installed* Little Monkey
+# CLI, daemon, compatible model and runtime. Never spins up a fake agent or
+# downloads a model silently on a public GitHub runner.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Exact installed target (for example ollama:your-model)"
+        type: string
+        required: true
+      runtime:
+        description: "Actual runtime name, version and model quantization"
+        type: string
+        required: true
+      app_version:
+        description: "Exact installed release/candidate version"
+        type: string
+        required: true
+      timeout_seconds:
+        description: "Bounded task execution wall time, max 3600"
+        type: number
+        default: 900
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  real-agent:
+    runs-on: [self-hosted, linux, x64, little-monkey-acceptance]
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify installed CLI and daemon are provisioned
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v monkey
+          command -v git
+          monkey --version
+          monkey daemon status
+
+      - name: Run real model, daemon event stream, and independent Git/test oracle
+        id: acceptance
+        shell: bash
+        env:
+          ACCEPT_TARGET: ${{ inputs.target }}
+          ACCEPT_RUNTIME: ${{ inputs.runtime }}
+          ACCEPT_VERSION: ${{ inputs.app_version }}
+          ACCEPT_TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          set -euo pipefail
+          EVIDENCE_ROOT="${LITTLE_MONKEY_EVIDENCE_ROOT:-$RUNNER_TEMP}"
+          mkdir -p "$EVIDENCE_ROOT"
+          EVIDENCE_DIR="$EVIDENCE_ROOT/first-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "evidence_dir=$EVIDENCE_DIR" >> "$GITHUB_OUTPUT"
+          node scripts/first-run-live-e2e.mjs \
+            --target "$ACCEPT_TARGET" \
+            --runtime "$ACCEPT_RUNTIME" \
+            --app-version "$ACCEPT_VERSION" \
+            --timeout-seconds "$ACCEPT_TIMEOUT" \
+            --evidence-dir "$EVIDENCE_DIR"
+
+      - name: Record evidence status, including failures
+        if: always()
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.acceptance.outputs.evidence_dir }}
+        run: |
+          if [ -n "$EVIDENCE_DIR" ] && [ -f "$EVIDENCE_DIR/summary.json" ]; then
+            node -e '
+              const s=require(process.argv[1]);
+              const summary={status:s.status,runId:s.runId,daemonStatus:s.daemonTerminalStatus,
+                agentTaskWallMs:s.measurable.agentTaskWallMs,
+                environment:s.environment,manualApprovalAndGuiVerified:false};
+              process.stdout.write(JSON.stringify(summary,null,2)+"\\n");
+            ' "$EVIDENCE_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "NO LIVE ACCEPTANCE EVIDENCE: the setup or harness failed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Raw logs remain on the self-hosted runner. Do not publish them before redacting credentials." >> "$GITHUB_STEP_SUMMARY"
+
+      # Upload only the top-level status JSON. Event traces, command output and
+      # source diffs remain private on the operator-owned runner for review.
+      - name: Upload non-secret run summary
+        if: always() && steps.acceptance.outputs.evidence_dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-run-real-model-summary
+          path: ${{ steps.acceptance.outputs.evidence_dir }}/summary.json
+          if-no-files-found: warn
+          retention-days: 7
