@@ -11,6 +11,14 @@ function errorText(error: unknown): string {
   return errorMessage(error);
 }
 
+function freshAgentInvocationId(): string {
+  // Browser/desktop uses a cryptographically random UUID. The fallback keeps
+  // older webview/test environments running without reusing a usage ledger ID.
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 /** In-flight cancellation handles, keyed by run id — deliberately NOT part of
  * the zustand state (an `AbortController` isn't a value React/zustand needs
  * to react to, and storing it in state would make the store non-serializable
@@ -119,7 +127,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         const result = await (autonomousIssueRunner() ?? runIssueToPrAgent)({
           runId: current.runId,
           // New provider calls after a crash must not reuse old token event IDs.
-          agentRunId: current.runId + "-repair-" + current.repairAttempts + "-" + crypto.randomUUID(),
+          agentRunId: current.runId + "-repair-" + current.repairAttempts + "-" + freshAgentInvocationId(),
           repositorySlug: current.repositorySlug,
           issueNumber: current.issueNumber,
           issueTitle: current.issueTitle,
@@ -194,7 +202,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       await api.advanceIssueToPr(run.runId, "implementing");
       const result = await (autonomousIssueRunner() ?? runIssueToPrAgent)({
         runId: run.runId,
-        agentRunId: run.runId + "-implementation-" + crypto.randomUUID(),
+        agentRunId: run.runId + "-implementation-" + freshAgentInvocationId(),
         repositorySlug: run.repositorySlug,
         issueNumber: run.issueNumber,
         issueTitle: run.issueTitle,
@@ -291,7 +299,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
             // Resume the existing tested diff, not the mutating coding turn.
             const result = await coordinator({
               runId: latest.runId,
-              agentRunId: latest.runId + "-review-recovery-" + crypto.randomUUID(),
+              agentRunId: latest.runId + "-review-recovery-" + freshAgentInvocationId(),
               repositorySlug: latest.repositorySlug,
               issueNumber: latest.issueNumber,
               issueTitle: latest.issueTitle,
