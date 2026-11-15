@@ -29,7 +29,7 @@ import { defaultAutonomousTaskRuntime, startAutonomousTask, type AutonomousTaskR
 import type { AutonomousTask, TaskDeliveryTarget } from './autonomousTask';
 import { resolveTarget } from './targetRouting';
 import { inspectOwnedWorktree } from './gitDelivery';
-import { runIssueToPrChecks, advanceIssueToPr } from './issueToPr';
+import { runIssueToPrChecks, advanceIssueToPr, getIssueToPrStatus, chargeIssueToPrTokens } from './issueToPr';
 
 /** Hard cap on model/tool round trips — generous relative to
  * `subagent.ts`'s `MAX_SUBAGENT_ITERATIONS` (15) since a full issue
@@ -72,6 +72,7 @@ export interface IssueToPrAgentResult {
    * comment) — `null` on an older host, where the flow still runs but has
    * no capsule to show. */
   durableRunId: string | null;
+  evidence?: { promptTokens: number; completionTokens: number };
 }
 
 function parseStructuredReview(value: string): StructuredReviewResult | null {
@@ -91,6 +92,20 @@ async function inspectionRevision(inspection: Awaited<ReturnType<typeof inspectO
   return `${inspection.headOid}:${digest}`;
 }
 
+/** Meter every actual provider result against the persisted issue's frozen budget.
+ * This applies to implementation, standalone review, and every repair. */
+async function meteredIssueRun(runId: string) {
+  const budget = await getIssueToPrStatus(runId);
+  if (budget.tokensUsed >= budget.totalTokenBudget) {
+    throw new Error("Frozen issue token budget exhausted before starting another model request.");
+  }
+  return {
+    maxWallTimeMs: budget.agentWallTimeMs,
+    onUsage: (usageId: string, inputTokens: number, outputTokens: number) =>
+      chargeIssueToPrTokens(runId, usageId, inputTokens, outputTokens).then(() => undefined),
+  };
+}
+
 /** Issue-to-PR's coordinator adapter. The existing state machine remains the
  * owner of GitHub delivery and its confirmation phrase; this adapter gives
  * the implementation phase the same plan/worker/evidence contract as every
@@ -99,6 +114,7 @@ export async function runIssueToPrAutonomousTask(
   params: RunIssueToPrAgentParams & { sessionId?: string },
 ): Promise<IssueToPrAgentResult & { task: AutonomousTask }> {
   let implementation: IssueToPrAgentResult | null = null;
+  const issuePolicy = await getIssueToPrStatus(params.runId);
   const resolvedTarget = await resolveTarget();
   const baseRuntime = defaultAutonomousTaskRuntime(resolvedTarget);
   const deliveryTarget: TaskDeliveryTarget = { worktreeId: params.worktreeId ?? params.runId, repositorySlug: params.repositorySlug, branch: params.branch, remote: 'origin', base: params.baseRef, title: `Issue #${params.issueNumber}: ${params.issueTitle}`, body: `Implements GitHub issue #${params.issueNumber}.` };
@@ -111,7 +127,7 @@ export async function runIssueToPrAutonomousTask(
       const after = await inspectOwnedWorktree(deliveryTarget.worktreeId);
       const beforeRevision = await inspectionRevision(before);
       const afterRevision = await inspectionRevision(after);
-      return { ok: implementation.outcome === 'completed', summary: implementation.summary, changedFiles: after.files.map((file) => file.path), workspaceRevision: afterRevision, mutation: { beforeRevision: task.workspaceRevision ?? beforeRevision, afterRevision, changedFiles: after.files.map((file) => file.path), patchDigest: afterRevision } };
+      return { ok: implementation.outcome === 'completed', summary: implementation.summary, usage: { inputTokens: implementation.evidence?.promptTokens ?? 0, outputTokens: implementation.evidence?.completionTokens ?? 0 }, changedFiles: after.files.map((file) => file.path), workspaceRevision: afterRevision, mutation: { beforeRevision: task.workspaceRevision ?? beforeRevision, afterRevision, changedFiles: after.files.map((file) => file.path), patchDigest: afterRevision } };
     },
     integrate: async (task) => {
       const inspection = await inspectOwnedWorktree(deliveryTarget.worktreeId);
@@ -134,7 +150,8 @@ export async function runIssueToPrAutonomousTask(
         return { ok: false, summary: 'Diff is empty or truncated; an independent review cannot verify the change.' };
       }
       const diff = [before.diffs.staged.text, before.diffs.unstaged.text, before.diffs.head.text].filter(Boolean).join('\n').slice(0, 32_000);
-      const reviewRun = await runHeadlessAgent({ runId: `${params.agentRunId ?? params.runId}-review`, signal: context.signal, toolProfile: 'explore', requiredWorkspaceRoot: params.workspaceLabel, systemPrompt: 'Review the owned worktree diff for the stated issue. Return strict JSON only: {"verdict":"pass"|"changes_required","findings":[{"severity":"blocking"|"warning"|"suggestion","path":string,"title":string,"body":string}],"filesReviewed":string[],"acceptanceCriteria":string[],"securityFindings":string[],"testCoverageFindings":string[]}. Do not mutate files.', userMessage: `Issue #${params.issueNumber}: ${params.issueTitle}\n${wrapUntrustedContent('Issue body', params.issueBody)}\nReview the implementation and checks in the app-owned worktree ${params.workspaceLabel}.\n${wrapUntrustedContent("Owned Git diff", diff)}\nFiles requiring review: ${changedFiles.join(", ")}.`, maxIterations: 8, executionSource: 'issue-to-pr-review', durableRun: { task: `Review issue-to-PR #${params.issueNumber}`, instructions: `Owned branch ${params.branch}` } });
+      const metering = await meteredIssueRun(params.runId);
+      const reviewRun = await runHeadlessAgent({ ...metering, runId: `${params.agentRunId ?? params.runId}-review`, signal: context.signal, toolProfile: 'explore', requiredWorkspaceRoot: params.workspaceLabel, systemPrompt: 'Review the owned worktree diff for the stated issue. Return strict JSON only: {"verdict":"pass"|"changes_required","findings":[{"severity":"blocking"|"warning"|"suggestion","path":string,"title":string,"body":string}],"filesReviewed":string[],"acceptanceCriteria":string[],"securityFindings":string[],"testCoverageFindings":string[]}. Do not mutate files.', userMessage: `Issue #${params.issueNumber}: ${params.issueTitle}\n${wrapUntrustedContent('Issue body', params.issueBody)}\nReview the implementation and checks in the app-owned worktree ${params.workspaceLabel}.\n${wrapUntrustedContent("Owned Git diff", diff)}\nFiles requiring review: ${changedFiles.join(", ")}.`, maxIterations: 8, executionSource: 'issue-to-pr-review', durableRun: { task: `Review issue-to-PR #${params.issueNumber}`, instructions: `Owned branch ${params.branch}` } });
       const review = parseStructuredReview(reviewRun.summary);
       const after = await inspectOwnedWorktree(deliveryTarget.worktreeId);
       const mutated = revision !== await inspectionRevision(after);
@@ -143,10 +160,11 @@ export async function runIssueToPrAutonomousTask(
       const reviewed = new Set(review.filesReviewed);
       const missing = changedFiles.filter((path) => !reviewed.has(path));
       const passed = !mutated && missing.length === 0 && review.verdict === 'pass' && !review.findings.some((finding) => finding.severity === 'blocking');
-      return { ok: passed, summary: mutated ? 'Review changed the owned worktree; evidence is stale.' : missing.length ? `Review omitted changed files: ${missing.join(', ')}` : JSON.stringify(review), review, evidence: criteria.map((criterion) => ({ evidenceId: `issue-review-${params.runId}-${criterion.id}`, criterionId: criterion.id, name: 'Issue-to-PR structured review', passed, authoritative: true, stale: mutated, summary: JSON.stringify(review), exitCode: passed ? 0 : 1, durationMs: 0, createdAtMs: Date.now(), source: 'review' as const })) };
+      return { ok: passed, summary: mutated ? 'Review changed the owned worktree; evidence is stale.' : missing.length ? `Review omitted changed files: ${missing.join(', ')}` : JSON.stringify(review), review, usage: { inputTokens: reviewRun.evidence.promptTokens, outputTokens: reviewRun.evidence.completionTokens }, evidence: criteria.map((criterion) => ({ evidenceId: `issue-review-${params.runId}-${criterion.id}`, criterionId: criterion.id, name: 'Issue-to-PR structured review', passed, authoritative: true, stale: mutated, summary: JSON.stringify(review), exitCode: passed ? 0 : 1, durationMs: 0, createdAtMs: Date.now(), source: 'review' as const })) };
     },
   };
-  const started = await startAutonomousTask({ objective: `Implement GitHub issue #${params.issueNumber}: ${params.issueTitle}`, sessionId: params.sessionId ?? null, constraints: { strategy: 'DELEGATE', source: 'issue', untrustedSource: true, allowExternalDelivery: true }, planningContext: { sourceMaterial: [wrapUntrustedContent('GitHub issue requirements', params.issueBody.slice(0, 12_000))] }, deliveryIntent: 'open_or_update_pr', deliveryTarget, runtime, signal: params.signal });
+  const started = await startAutonomousTask({ objective: `Implement GitHub issue #${params.issueNumber}: ${params.issueTitle}`, sessionId: params.sessionId ?? null, constraints: { strategy: 'DELEGATE', source: 'issue', untrustedSource: true, allowExternalDelivery: true }, planningContext: { sourceMaterial: [wrapUntrustedContent('GitHub issue requirements', params.issueBody.slice(0, 12_000))] }, deliveryIntent: 'open_or_update_pr', deliveryTarget, runtime, signal: params.signal,
+    budgetSnapshot: { wallTimeMs: issuePolicy.agentWallTimeMs, maxRepairRounds: issuePolicy.maxRepairAttempts } });
   const result = await started.completion;
   const implementationResult = implementation as IssueToPrAgentResult | null;
   const verifiedTests = result.verificationEvidence.some((item) =>
@@ -213,7 +231,9 @@ export async function runIssueToPrAgent(
     ...(params.repairEvidence ? ['', wrapUntrustedContent('CI failure evidence (untrusted)', params.repairEvidence.slice(0, 12_000))] : []),
   ].join('\n');
 
+  const metering = await meteredIssueRun(params.runId);
   return runHeadlessAgent({
+    ...metering,
     runId: params.agentRunId ?? params.runId,
     signal: params.signal,
     systemPrompt,
