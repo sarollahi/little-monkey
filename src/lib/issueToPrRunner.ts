@@ -42,6 +42,8 @@ export interface RunIssueToPrAgentParams {
    * permission prompts/cancellation) and the Run Capsule ledger's `run_id` —
    * one id, one evidence trail, exactly one issue-to-pr run. */
   runId: string;
+  /** Fresh ledger identity for each repair while keeping the same issue state id. */
+  agentRunId?: string;
   repositorySlug: string;
   issueNumber: number;
   issueTitle: string;
@@ -192,7 +194,7 @@ export async function runIssueToPrAgent(
   ].join('\n');
 
   return runHeadlessAgent({
-    runId: params.runId,
+    runId: params.agentRunId ?? params.runId,
     signal: params.signal,
     systemPrompt,
     userMessage,
