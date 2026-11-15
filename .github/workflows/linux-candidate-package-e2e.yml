@@ -117,7 +117,7 @@ jobs:
             const current=process.argv[1].split(".").map(Number);
             const compare=(a,b)=>{for(let i=0;i<3;i++){if(a[i]!==b[i])return a[i]-b[i]}return 0};
             const releases=JSON.parse(fs.readFileSync("evidence/release-list.json","utf8"));
-            const viable=releases.filter(x=>!x.isDraft&&!x.isPrerelease&&/^\\d+\\.\\d+\\.\\d+$/.test(x.tagName))
+            const viable=releases.filter(x=>!x.isDraft&&!x.isPrerelease&&/^\d+\.\d+\.\d+$/.test(x.tagName))
               .filter(x=>compare(x.tagName.split(".").map(Number),current)<0)
               .sort((a,b)=>compare(b.tagName.split(".").map(Number),a.tagName.split(".").map(Number)));
             process.stdout.write(viable[0]?.tagName||"");
@@ -146,12 +146,12 @@ jobs:
           expected="$(dpkg-deb -f "$file" Version)"
           actual="$(dpkg-query -W -f='${Version}' "$package_name")"
           test "$actual" = "$expected"
-          printf '%s\\n' "$package_name" > evidence/package-name.txt
+          printf '%s\n' "$package_name" > evidence/package-name.txt
           echo "$actual" > evidence/previous-installed-version.txt
           mkdir -p "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app"
           # Synthetic canary: package-manager data retention ONLY. This is
           # not proof that live user session databases migrated successfully.
-          printf 'acceptance-canary-%s\\n' "$GITHUB_SHA" > "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app/canary.txt"
+          printf 'acceptance-canary-%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app/canary.txt"
           sha256sum "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app/canary.txt" > evidence/data-canary-before.txt
 
       - name: Actually upgrade to candidate and verify installed version and canary
