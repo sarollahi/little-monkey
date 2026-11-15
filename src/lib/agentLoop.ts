@@ -1973,7 +1973,17 @@ function daemonProjectionContent(
   projection: Awaited<ReturnType<typeof watchDaemonDesktopTurn>>,
 ): string {
   if (!projection.terminal) {
-    return projection.output || `⏳ ${projection.status}`;
+    const attention = /Waiting for approval|paused|Reconnecting|Recovering|unavailable|incomplete/i
+      .test(projection.status);
+    return attention && projection.output
+      ? `${projection.output}\n\n[Session: ${projection.status}]`
+      : projection.output || `⏳ ${projection.status}`;
+  }
+  if (projection.terminalStatus === 'needs_reconciliation') {
+    const reason = projection.error || 'An external operation requires reconciliation.';
+    return projection.output
+      ? `${projection.output}\n\n[Needs reconciliation: ${reason}]`
+      : `[Needs reconciliation: ${reason}]`;
   }
   if (projection.terminalStatus === 'succeeded') {
     return projection.output || projection.summary || 'Background turn completed.';

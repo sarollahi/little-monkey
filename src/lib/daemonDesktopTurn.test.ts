@@ -419,6 +419,57 @@ describe("daemon desktop routing and event replay", () => {
     expect(mocks.daemonCancel).not.toHaveBeenCalled();
   });
 
+  it("refuses to fabricate a missing daemon run after reconnect", async () => {
+    mocks.getRun.mockResolvedValue(null);
+    mocks.loadRunEvents.mockResolvedValue([]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "missing", assistantIndex: 0,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      error: expect.stringContaining("automatic recovery is impossible"),
+    });
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("detects missing sequence numbers without combining partial model output", async () => {
+    mocks.getRun.mockResolvedValue({ status: "running" } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 12, event: { type: "model_delta",
+        payload: { channel: "assistant", text: "unsafe splice" } } },
+    ] as RunEventEnvelopeWire[]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 0,
+        lastSequence: 7, output: "prior" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection.terminalStatus).toBe("needs_reconciliation");
+    expect(projection.error).toContain("expected 8, received 12");
+    expect(projection.output).toBe("prior");
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("renders approval, pause and reconciliation from authoritative run state", () => {
+    const link = {
+      output: "", status: "running", terminal: false, terminalStatus: null,
+      error: null, summary: null, lastSequence: 0,
+    } as DaemonTurnProjection;
+    expect(projectDaemonTurnEvents(link, [], {
+      status: "waiting_for_permission",
+    } as RunRecord).status).toMatch(/approval/i);
+    expect(projectDaemonTurnEvents(link, [], {
+      status: "paused",
+    } as RunRecord).status).toMatch(/paused/i);
+    expect(projectDaemonTurnEvents(link, [], {
+      status: "needs_reconciliation",
+    } as RunRecord)).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      error: expect.stringContaining("ambiguous outcome"),
+    });
+  });
+
   it("detaches a recovered observer without cancelling daemon-owned execution", async () => {
     const controller = new AbortController();
     controller.abort();

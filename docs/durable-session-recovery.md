@@ -135,3 +135,13 @@ to the authoritative run and displays output/events. The shell has
 silently continue under a different security/context snapshot. The operator
 must start a new session for further instructions. This is a conservative
 partial recovery, not complete reconstruction of lost unsaved UI state.
+
+## Event stream integrity and missing runs
+
+The desktop observer does not interpret a missing run record as a fresh turn.
+It stops with a reconciliation explanation, preserving its last displayable
+output. Likewise, if a page from the existing per-run ledger skips sequence
+numbers after an exclusive cursor, it reports the exact gap and refuses to
+splice untrusted or incomplete stream content onto a previous answer. Approval,
+pause, reconnect and reconciliation states are derived from the existing run
+record and typed run events, not from client-local execution state.

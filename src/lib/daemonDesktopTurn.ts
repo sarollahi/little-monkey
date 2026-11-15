@@ -604,6 +604,22 @@ export function projectDaemonTurnEvents(
       case "tool_proposed": next.status = `Preparing ${event.payload.tool_name}…`; break;
       case "tool_started": next.status = "Running an approved tool…"; break;
       case "permission_requested": next.status = `Waiting for approval: ${event.payload.tool_name}`; break;
+      case "awaiting_approval":
+        next.status = event.payload.reason
+          ? `Waiting for approval: ${event.payload.reason}`
+          : "Waiting for approval from the authorized operator.";
+        break;
+      case "permission_decided":
+        next.status = "Permission decision recorded; resident agent continuing…"; break;
+      case "verification_finished":
+        next.status = event.payload.passed
+          ? `Verification passed: ${event.payload.name}`
+          : `Verification failed: ${event.payload.name}`;
+        break;
+      case "external_mutation_prepared":
+        next.status = "External operation prepared; awaiting confirmed outcome."; break;
+      case "external_mutation_confirmed":
+        next.status = "External operation confirmed in durable ledger."; break;
       case "paused": next.status = "Background turn paused."; break;
       case "cancelling": next.status = "Stopping background turn…"; break;
       case "completed": next.summary = event.payload.summary; break;
@@ -613,9 +629,19 @@ export function projectDaemonTurnEvents(
       default: break;
     }
   }
+  if (run?.status === "waiting_for_permission" && !next.status.includes("approval")) {
+    next.status = "Waiting for approval from the authorized operator.";
+  } else if (run?.status === "paused") {
+    next.status = "Resident agent paused.";
+  } else if (run?.status === "cancelling") {
+    next.status = "Resident agent cancellation requested.";
+  }
   if (run?.status && ["succeeded", "failed", "cancelled", "needs_reconciliation"].includes(run.status)) {
     next.terminal = true;
     next.terminalStatus = run.status;
+    if (run.status === "needs_reconciliation" && !next.error) {
+      next.error = "A prior external operation has an ambiguous outcome; inspection is required.";
+    }
   }
   return next;
 }
@@ -773,6 +799,32 @@ export async function watchDaemonDesktopTurn(
         callbacks.onProjection(projection);
         await wait(Math.min(5_000, 250 * 2 ** Math.min(consecutiveReadFailures, 5)));
         continue;
+      }
+      if (run === null) {
+        // A purged/missing run cannot be reconstructed from an old client
+        // cursor. Never treat this as a request to execute a new copy.
+        projection = {
+          ...projection,
+          terminal: true,
+          terminalStatus: "needs_reconciliation",
+          status: "Resident run unavailable after reconnect.",
+          error: "Run record is missing or outside retention; automatic recovery is impossible.",
+        };
+        callbacks.onProjection(projection);
+        return projection;
+      }
+      if (events.length > 0 && events[0].sequence > link.lastSequence + 1) {
+        // RunLedger writes contiguous per-run sequences. A gap is data loss
+        // or a damaged response, not permission to stitch model text together.
+        projection = {
+          ...projection,
+          terminal: true,
+          terminalStatus: "needs_reconciliation",
+          status: "Durable event history is incomplete.",
+          error: `Run event cursor gap: expected ${link.lastSequence + 1}, received ${events[0].sequence}. Review the run ledger; no tools were restarted.`,
+        };
+        callbacks.onProjection(projection);
+        return projection;
       }
       projection = projectDaemonTurnEvents(projection, events, run);
       link = { ...link, lastSequence: projection.lastSequence, output: projection.output };
