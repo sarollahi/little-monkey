@@ -186,6 +186,9 @@ jobs:
         timeout-minutes: 8
         run: pnpm test:browser-policy
 
+      - name: Enforce manual release policy and canonical repository links
+        run: pnpm test:release-policy:contract
+
       - name: Release asset integrity contracts (offline, real digests)
         run: |
           node --check scripts/release-asset-integrity.mjs
