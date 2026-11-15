@@ -237,10 +237,13 @@ export function formatLeg(name, { outcome, reason }) {
  * A skip does not fail the release. It is *reported*, which is the difference
  * between "we know this is not covered here" and "we think this is covered".
  */
-export function exitCodeFor(legs, { requireClean = false } = {}) {
+export function exitCodeFor(legs, { requireClean = false, requireUpgrade = false } = {}) {
   if (legs.some((leg) => leg.outcome === OUTCOME.Fail)) return 1;
   // Release jobs must not turn a missing artifact into a green required gate.
   // Ad-hoc runs still report SKIPPED for genuinely inapplicable checks.
-  if (requireClean && legs[0]?.outcome !== OUTCOME.Pass) return 1;
+  if (requireClean && legs.find((leg) => leg.name === "clean install")?.outcome !== OUTCOME.Pass) return 1;
+  // A previously published version exists: silently skipping the upgrade
+  // would turn the release's only upgrade gate into a no-op.
+  if (requireUpgrade && legs.find((leg) => leg.name === "upgrade")?.outcome !== OUTCOME.Pass) return 1;
   return 0;
 }
