@@ -63,7 +63,7 @@ Confirm each, or explain why it doesn't apply:
 
 <!--
 Do NOT report a vulnerability here. Use a private advisory:
-https://github.com/AA-Box/little-monkey/security/advisories/new
+https://github.com/sarollahi/little-monkey/security/advisories/new
 -->
 
 ## Screenshots / output
