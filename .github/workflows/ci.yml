@@ -303,6 +303,16 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Build actual CLI used by the daemon E2E tests on every OS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
+          cli="$PWD/src-tauri/target/debug/monkey-cli"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then cli="$cli.exe"; fi
+          test -f "$cli"
+          echo "LM_CHANNEL_E2E_CLI=$cli" >> "$GITHUB_ENV"
+
       - name: Provision Linux reflink test volume
         if: startsWith(matrix.os, 'ubuntu')
         run: |
