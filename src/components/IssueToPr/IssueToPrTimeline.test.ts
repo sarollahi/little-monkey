@@ -18,6 +18,7 @@ const fixture = (changes: Partial<IssueToPrRun> = {}): IssueToPrRun => ({
   prNumber: null,
   prUrl: null,
   checks: [],
+  reviewEvidence: null,
   ciHistory: [],
   ciHeadOid: null,
   repairAttempts: 0,
@@ -65,7 +66,7 @@ describe("issue-to-PR evidence timeline", () => {
   });
 
   it("reaches Ready only after reviewed delivery, clean local checks, and matching green CI", () => {
-    const stages = issueToPrStages(fixture({ status: "ready", prNumber: 4, checks: [successfulCheck], ciHeadOid: greenCI.headOid, ciHistory: [greenCI], repairAttempts: 1 }));
+    const stages = issueToPrStages(fixture({ status: "ready", prNumber: 4, checks: [successfulCheck], reviewEvidence: { revision: "d".repeat(64), filesReviewed: ["src/fix.ts"], summary: "No blocking findings", observedAtMs: 40 }, ciHeadOid: greenCI.headOid, ciHistory: [greenCI], repairAttempts: 1 }));
     expect(stages.find((stage) => stage.name === "Testing")?.status).toBe("complete");
     expect(stages.find((stage) => stage.name === "Review")?.status).toBe("complete");
     expect(stages.find((stage) => stage.name === "CI")?.status).toBe("complete");
