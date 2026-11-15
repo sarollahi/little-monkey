@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Open-ended ideas are usually better as a
-        [Discussion](https://github.com/AA-Box/little-monkey/discussions).
+        [Discussion](https://github.com/sarollahi/little-monkey/discussions).
         Use this template when you have a concrete, scoped proposal.
 
   - type: textarea
@@ -69,7 +69,7 @@ body:
       label: Before submitting
       options:
         - label: >-
-            I checked [ROADMAP.md](https://github.com/AA-Box/little-monkey/blob/develop/ROADMAP.md)
+            I checked [ROADMAP.md](https://github.com/sarollahi/little-monkey/blob/develop/ROADMAP.md)
             — this isn't already planned with a stated acceptance boundary.
           required: true
         - label: >-
