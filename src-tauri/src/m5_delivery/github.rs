@@ -310,6 +310,56 @@ fn read_checks_with(
     )
 }
 
+/// An Actions URL is provider data, not executable input. Extract only a
+/// decimal run id from the exact already-validated owned repository origin.
+fn actions_run_id(repository_slug: &str, url: &str) -> Option<u64> {
+    let prefix = format!("https://github.com/{repository_slug}/actions/runs/");
+    let suffix = url.strip_prefix(&prefix)?;
+    let value = suffix.split(['/', '?', '#']).next()?;
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u64>().ok().filter(|id| *id > 0)
+}
+
+/// Read-only failure context from authenticated gh. Only the CI run ids
+/// extracted from the current PR's GitHub check rollup can be inspected.
+/// Logs are capped, read as untrusted text and never executed.
+pub fn read_failed_workflow_logs(repository_slug: &str, number: u32) -> Result<Value, String> {
+    let rollup = read_checks(repository_slug, number)?;
+    let entries = rollup.get("statusCheckRollup").and_then(Value::as_array)
+        .ok_or_else(|| "GitHub did not return status checks".to_string())?;
+    let mut logs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in entries.iter().filter(|check| {
+        matches!(
+            check.get("conclusion").or_else(|| check.get("state")).and_then(Value::as_str),
+            Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED")
+        )
+    }).take(6) {
+        let name = entry.get("name").or_else(|| entry.get("context"))
+            .and_then(Value::as_str).unwrap_or("unnamed");
+        let url = entry.get("detailsUrl").or_else(|| entry.get("targetUrl"))
+            .and_then(Value::as_str).unwrap_or("");
+        let run_id = actions_run_id(repository_slug, url);
+        if let Some(id) = run_id {
+            if seen.insert(id) {
+                let result = run_gh_text(vec![
+                    "run".to_string(), "view".to_string(), id.to_string(),
+                    "--repo".to_string(), repository_slug.to_string(), "--log-failed".to_string(),
+                ]);
+                let log = result.unwrap_or_else(|error| format!("Log unavailable: {error}"));
+                logs.push(serde_json::json!({ "name": name, "runId": id, "log": bounded(&log, 12_000) }));
+            }
+        } else {
+            logs.push(serde_json::json!({
+                "name": name, "log": "Non-Actions check or no owned-repo Actions run URL; inspect its published check details."
+            }));
+        }
+    }
+    Ok(serde_json::json!({ "headRefOid": rollup.get("headRefOid"), "logs": logs }))
+}
+
 pub fn pull_request_metadata(
     repository_slug: &str,
     number: u32,
@@ -995,6 +1045,14 @@ fn bounded(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn actions_log_url_accepts_only_matching_repository_and_decimal_run_id() {
+        assert_eq!(actions_run_id("owner/repo", "https://github.com/owner/repo/actions/runs/123/job/456"), Some(123));
+        assert_eq!(actions_run_id("owner/repo", "https://github.com/evil/repo/actions/runs/123"), None);
+        assert_eq!(actions_run_id("owner/repo", "https://github.com/owner/repo/actions/runs/123;rm"), None);
+        assert_eq!(actions_run_id("owner/repo", "https://example.com/actions/runs/123"), None);
+    }
+
     use super::*;
     use crate::m5_delivery::git::{commit_paths, create_owned_worktree, git_text};
     use crate::m5_delivery::store::DeliveryStore;
