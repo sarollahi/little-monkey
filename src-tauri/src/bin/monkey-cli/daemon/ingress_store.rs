@@ -322,16 +322,33 @@ impl DaemonStore {
         account: Option<&str>,
         limit: u32,
     ) -> Result<Vec<StoredIngressTurn>, String> {
-        let mut statement = self.connection.prepare(&format!(
-            "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns
-             WHERE (?1 IS NULL OR source=?1)
-               AND (?2 IS NULL OR source_account_id=?2)
-             ORDER BY created_at_ms DESC, ingress_id DESC LIMIT ?3"
-        )).map_err(|error| error.to_string())?;
+        // Build only WHERE clauses actually supplied. The earlier nullable
+        // predicate form ("? IS NULL OR source=?") was logically correct but
+        // prevented SQLite from using the v21 (source, account, time) index.
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        let mut predicates = Vec::new();
+        if let Some(source) = source {
+            values.push(rusqlite::types::Value::Text(source.as_str().into()));
+            predicates.push(format!("source=?{}", values.len()));
+        }
+        if let Some(account) = account {
+            values.push(rusqlite::types::Value::Text(account.into()));
+            predicates.push(format!("source_account_id=?{}", values.len()));
+        }
+        values.push(rusqlite::types::Value::Integer(i64::from(limit.clamp(1, 200))));
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", predicates.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns {where_clause}
+             ORDER BY created_at_ms DESC, ingress_id DESC LIMIT ?{}",
+            values.len(),
+        );
+        let mut statement = self.connection.prepare(&sql).map_err(|error| error.to_string())?;
         let rows = statement.query_map(
-            params![source.map(|value| value.as_str().to_string()), account,
-                    i64::from(limit.clamp(1, 200))],
-            read_ingress_turn,
+            rusqlite::params_from_iter(values.iter()), read_ingress_turn,
         ).map_err(|error| error.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
