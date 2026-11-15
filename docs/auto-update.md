@@ -89,8 +89,8 @@ To (re)do the setup from scratch:
 3. Add the **private** key and its password as repository secrets:
 
    ```bash
-   gh secret set TAURI_SIGNING_PRIVATE_KEY -R AA-Box/little-monkey < ~/.tauri/little-monkey.key
-   gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R AA-Box/little-monkey
+   gh secret set TAURI_SIGNING_PRIVATE_KEY -R sarollahi/little-monkey < ~/.tauri/little-monkey.key
+   gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R sarollahi/little-monkey
    ```
 
    The release workflow already passes both to `tauri-action`, which then
