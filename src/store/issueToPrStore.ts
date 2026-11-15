@@ -19,6 +19,7 @@ const controllers = new Map<string, AbortController>();
 const monitorTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const CI_POLL_MS = 30_000;
 let unlisten: (() => void) | null = null;
+let initialization: Promise<void> | null = null;
 const runIssueToPrAgent = issueToPrRunner.runIssueToPrAgent;
 const autonomousIssueRunner = "runIssueToPrAutonomousTask" in issueToPrRunner
   ? issueToPrRunner.runIssueToPrAutonomousTask
@@ -305,14 +306,16 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
     clearMessages: () => set({ error: null, notice: null }),
 
-    init: async () => {
-      if (!unlisten) {
-        unlisten = await api.listenIssueToPrProgress(onProgress);
-      }
-      await get().refresh();
-      for (const run of get().runs) {
-        resumeOrphanedRun(run);
-      }
+    init: () => {
+      // Main window starts recovery at boot; the panel may mount during the
+      // same async listener registration. Share one initialization promise.
+      if (initialization) return initialization;
+      initialization = (async () => {
+        if (!unlisten) unlisten = await api.listenIssueToPrProgress(onProgress);
+        await get().refresh();
+        for (const run of get().runs) resumeOrphanedRun(run);
+      })().finally(() => { initialization = null; });
+      return initialization;
     },
 
     refresh: () =>
