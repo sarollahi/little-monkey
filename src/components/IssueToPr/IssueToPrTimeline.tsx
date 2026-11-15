@@ -39,7 +39,7 @@ export function IssueToPrTimeline({ run }: { run: IssueToPrRun }) {
           </li>
         ))}
       </ol>
-      {run.ciHistory?.length > 0 && (
+      {(run.ciHistory?.length ?? 0) > 0 && (
         <details className="mt-2 text-xs text-muted">
           <summary>GitHub CI evidence ({run.ciHistory.length} observations)</summary>
           {run.ciHistory.slice(-12).map((observation, index) => (
