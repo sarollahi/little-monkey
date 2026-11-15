@@ -137,6 +137,10 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           current = await api.runIssueToPrChecks(current.runId);
         }
         if (current.status !== "repairing") return;
+        if (current.repairInProgress) {
+          await api.advanceIssueToPr(run.runId, "failed", { error: "Repair did not reach authoritative verification." });
+          return;
+        }
       }
     } catch (error) {
       const latest = await api.getIssueToPrStatus(run.runId).catch(() => null);
@@ -202,6 +206,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         return;
       }
       const coordinatorOutcome = "task" in result ? (result as { task?: { outcome?: string } }).task?.outcome : undefined;
+      if (result.durableRunId) await api.advanceIssueToPr(run.runId, "implementing", { durableRunId: result.durableRunId }).catch(() => {});
       const latest = await api.getIssueToPrStatus(run.runId);
       if (latest.status === "repairing") {
         void driveRepair(latest);
@@ -209,7 +214,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       }
       if (latest.status === "opening_pr" || latest.status === "failed" || latest.status === "cancelled") return;
       if (coordinatorOutcome === "WAITING_USER" || coordinatorOutcome === "WAITING_APPROVAL") {
-        await api.advanceIssueToPr(run.runId, "opening_pr");
+        await api.advanceIssueToPr(run.runId, "failed", { error: "Missing authoritative local check and independent review evidence." });
         return;
       }
       if (result.outcome === "error") {
@@ -219,21 +224,14 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         });
         return;
       }
-      if (result.durableRunId) {
-        // Self-report onto "implementing" (the status this run was moved to
-        // a few lines up) rather than the closed-over `run.status`, which is
-        // still this run's value from before `start()` kicked off the drive
-        // and would make the Rust state machine reject the whole call.
-        await api
-          .advanceIssueToPr(run.runId, "implementing", { durableRunId: result.durableRunId })
-          .catch(() => {});
-      }
       const checked = await api.runIssueToPrChecks(run.runId);
       if (checked.status === "repairing") void driveRepair(checked);
     } catch (error) {
       await api.advanceIssueToPr(run.runId, "failed", { error: errorText(error) }).catch(() => {});
     } finally {
       controllers.delete(run.runId);
+      const latest = await api.getIssueToPrStatus(run.runId).catch(() => null);
+      if (latest?.status === "repairing") void driveRepair(latest);
     }
   };
 
