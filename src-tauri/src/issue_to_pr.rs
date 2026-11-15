@@ -109,6 +109,9 @@ pub struct IssueToPrRun {
     pub issue_number: u32,
     pub issue_title: String,
     pub issue_body: String,
+    /// Bounded issue comments are context, never executable instructions.
+    #[serde(default)]
+    pub issue_comments: Vec<String>,
     pub worktree_id: String,
     pub branch: String,
     /// The branch/ref the owned worktree was created from and the eventual PR
@@ -478,11 +481,16 @@ pub async fn issue_to_pr_start(
         .and_then(Value::as_str)
         .unwrap_or("Untitled issue")
         .to_string();
-    let issue_body = issue
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let issue_body = bounded(issue
+        .get("body").and_then(Value::as_str).unwrap_or(""), 32_000);
+    let issue_comments: Vec<String> = issue
+        .get("comments").and_then(Value::as_array)
+        .map(|comments| comments.iter().take(24).filter_map(|comment| {
+            let body = comment.get("body")?.as_str()?;
+            let author = comment.get("author").and_then(|a| a.get("login"))
+                .and_then(Value::as_str).unwrap_or("unknown");
+            Some(format!("Author {}: {}", bounded(author, 80), bounded(body, 2_000)))
+        }).collect()).unwrap_or_default();
 
     let now = now_ms()?;
     let run = IssueToPrRun {
@@ -492,6 +500,7 @@ pub async fn issue_to_pr_start(
         issue_number: number,
         issue_title,
         issue_body,
+        issue_comments,
         worktree_id,
         branch,
         base_ref: run_base_ref,
@@ -1066,6 +1075,7 @@ mod tests {
             issue_number,
             issue_title: "Fixture issue".to_string(),
             issue_body: "Body".to_string(),
+            issue_comments: Vec::new(),
             worktree_id: format!("wt-{created_at_ms}"),
             branch: "issue-to-pr/fixture".to_string(),
             base_ref: "develop".to_string(),
