@@ -73,14 +73,21 @@ if (!onlyRust) {
   });
 }
 if (!onlyFrontend) {
+  // Tauri's build.rs expects its staged CLI placeholder and the managed
+  // runtime fixture, just like the existing pnpm test:rust entrypoint.
+  for (const setup of ["stage:cli:placeholder", "stage:sherpa-runtime"]) {
+    suites.push({
+      name: `Rust build prerequisites: ${setup}`,
+      command: process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+      argv: [setup],
+    });
+  }
   for (const pattern of rustCases) {
     suites.push({
       name: `Rust daemon acceptance: ${pattern}`,
       command: "cargo",
       argv: ["test", "--manifest-path", "src-tauri/Cargo.toml",
-        "--bin", "monkey-cli", pattern, "--", "--nocapture", "--exact"],
-      // Rust tests are module-qualified. --exact would not match a bare
-      // method name; the invocation below drops it intentionally.
+        "--bin", "monkey-cli", pattern, "--", "--nocapture"],
     });
   }
   suites.push({
@@ -94,14 +101,13 @@ if (!onlyFrontend) {
 let failed = false;
 try {
   for (const suite of suites) {
-    // Test filters match a qualified Rust test name by substring; never
-    // apply --exact to a non-qualified name, which would silently run zero.
-    const argv = suite.argv[0] === "test" && suite.argv.includes("--bin") ?
-      suite.argv.filter(flag => flag !== "--exact") : suite.argv;
+    // Rust test filters use substring matching on fully-qualified names.
+    const argv = suite.argv;
     const start = Date.now();
     console.log(`\n=== ${suite.name} ===\n${suite.command} ${argv.join(" ")}`);
     const res = spawnSync(suite.command, argv, {
       stdio: "inherit",
+      shell: process.platform === "win32" && suite.command === "pnpm.cmd",
       env: { ...process.env, CI: process.env.CI ?? "1" },
     });
     report.checks.push({
