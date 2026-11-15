@@ -30,9 +30,13 @@ only with disposable test workspaces and identities.
 
 - [Linux candidate installer E2E](../.github/workflows/linux-candidate-package-e2e.yml)
   builds a real unsigned x64 `.deb` on a temporary Ubuntu runner, checks
-  runtime manifests, runs installer payload and CLI smoke checks, and installs
-  the same candidate through `apt`. It is not a GUI run or a real upgrade,
-  and it does not publish artifacts as a GitHub Release.
+  runtime manifests, runs installer payload and CLI smoke checks, downloads
+  and SHA-256-checks the newest published *older* x64 Debian installer,
+  installs that version through `apt`, upgrades through the same package
+  manager to the candidate, and downgrades through `apt` as a rollback
+  exercise. A canary validates basic file retention, **not** app-database
+  migration. This does not exercise the signed in-app updater's rollback
+  script or a graphical first run, and it does not publish to GitHub Releases.
 - [Real-model first-run](../.github/workflows/first-run-live-e2e.yml) is
   **manual-only** on a provisioned self-hosted runner; it invokes the installed
   daemon and configured target, stores actual events and checks the terminal
