@@ -2,6 +2,10 @@
 
 **Decision: NOT RELEASE READY. Do not publish.**
 
+This report reflects source inspection and unexecuted candidate checks. See
+[the full acceptance matrix](release-acceptance.md). It is not updated
+automatically when workflow definitions are added.
+
 Target branch: `develop`. Audited base commit:
 `5eec6de8402d7cf7be4da528c5026717bf41712b`.
 Latest published release independently identified in GitHub release metadata:
@@ -35,9 +39,11 @@ manufactured execution results.
 | Architecture selection regressions | **NOT YET VERIFIED** | CI runs existing `pnpm test:install-smoke` |
 | Asset SHA-256 regression tests | **NOT YET VERIFIED** | CI runs `node --test scripts/release-asset-integrity.test.mjs` |
 | Frontend typecheck, build, UI tests and native cross-OS tests | **NOT YET VERIFIED ON THIS BRANCH** | Existing CI, check result at exact commit |
-| Clean physical install on advertised OS/architectures | **UNVERIFIED** | Installer payload extraction is weaker |
+| Linux candidate package build and actual Ubuntu `apt` installation | **NOT YET VERIFIED** | Dedicated CI job builds and installs unsigned candidate; requires completed run |
+| Clean physical install on advertised OS/architectures | **UNVERIFIED** | CI Ubuntu package installation alone cannot verify the six real end-user targets |
+| Real installed CLI/daemon/model coding task | **UNVERIFIED** | Opt-in self-hosted harness now records terminal run state and raw evidence; no real run submitted |
 | Genuine model coding task with permissions and independent diff review | **UNVERIFIED** | Need exact model/run/driver + raw logs and human permission check |
-| Signed upgrade and real rollback, on physical OS | **UNVERIFIED** | Existing snapshot/rollback code is not execution evidence |
+| Real cross-version upgrade and rollback on a physical OS | **UNVERIFIED** | Release gate refuses a skipped supported upgrade; existing scratch canary alone is insufficient |
 | Release signature and trust-chain verification | **UNVERIFIED** | SHA-256 against GitHub metadata does not independently authenticate publisher |
 | Startup/idle RSS or PSS/first-token/task duration/cancellation cleanup | **UNVERIFIED** | No measurements fabricated |
 | Physical LAN/TLS and HTTP compatibility across adapters | **UNVERIFIED** | Required for a later server migration, not rewired here |
@@ -85,4 +91,7 @@ artifacts before changing any status.
 7. Sign off each gate; leave unmeasured or unexercised scope `UNVERIFIED`.
    Only then decide whether a release is justified.
 
-**No release has been created or published by this work.**
+**No release has been created or published by this work.** Publishing
+is now a manually confirmed GitHub Actions workflow, restricted to the
+release branch `main` and requiring a human-reviewed acceptance evidence URL.
+That explicit approval is not an automatic validator of physical hardware.
