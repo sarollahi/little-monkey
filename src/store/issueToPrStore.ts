@@ -5,6 +5,7 @@ import type { IssueToPrRun } from "../lib/issueToPr";
 import { isTerminalIssueToPrStatus } from "../lib/issueToPr";
 import * as issueToPrRunner from "../lib/issueToPrRunner";
 import { errorMessage } from "../lib/errors";
+import { githubReviewThreads } from "../lib/gitDelivery";
 
 function errorText(error: unknown): string {
   return errorMessage(error);
@@ -15,6 +16,8 @@ function errorText(error: unknown): string {
  * to react to, and storing it in state would make the store non-serializable
  * for no benefit). */
 const controllers = new Map<string, AbortController>();
+const monitorTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const CI_POLL_MS = 30_000;
 let unlisten: (() => void) | null = null;
 const runIssueToPrAgent = issueToPrRunner.runIssueToPrAgent;
 const autonomousIssueRunner = "runIssueToPrAutonomousTask" in issueToPrRunner
@@ -26,6 +29,8 @@ const autonomousIssueRunner = "runIssueToPrAutonomousTask" in issueToPrRunner
  * it otherwise leaks across every test in the same file. */
 export function __resetIssueToPrControllersForTests(): void {
   controllers.clear();
+  for (const timer of monitorTimers.values()) clearTimeout(timer);
+  monitorTimers.clear();
 }
 
 interface IssueToPrState {
@@ -39,7 +44,7 @@ interface IssueToPrState {
   init: () => Promise<void>;
   refresh: () => Promise<void>;
   selectRun: (runId: string | null) => void;
-  start: (issueUrl: string) => Promise<IssueToPrRun>;
+  start: (issueUrl: string, maxRepairAttempts?: number) => Promise<IssueToPrRun>;
   cancel: (runId: string) => Promise<void>;
   markPrOpened: (runId: string, prNumber: number, prUrl: string) => Promise<void>;
   markDone: (runId: string) => Promise<void>;
@@ -67,8 +72,91 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
     }
   };
 
+  function scheduleCiPoll(runId: string, delay = CI_POLL_MS): void {
+    if (monitorTimers.has(runId)) return;
+    const timer = setTimeout(() => {
+      monitorTimers.delete(runId);
+      void (async () => {
+        try {
+          const latest = await api.getIssueToPrStatus(runId);
+          if (latest.status !== "monitoring_ci") return;
+          onProgress(await api.pollIssueToPrCi(runId));
+        } catch (error) {
+          // A transient GitHub error must not produce a false success.
+          set((state) => ({ activityByRun: { ...state.activityByRun, [runId]: "CI observation unavailable: " + errorText(error) } }));
+          scheduleCiPoll(runId, Math.min(delay * 2, 120_000));
+        }
+      })();
+    }, delay);
+    monitorTimers.set(runId, timer);
+  }
+
+  async function driveRepair(run: IssueToPrRun): Promise<void> {
+    if (controllers.has(run.runId)) return;
+    const controller = new AbortController();
+    controllers.set(run.runId, controller);
+    try {
+      let current = await api.getIssueToPrStatus(run.runId);
+      while (current.status === "repairing" && !controller.signal.aborted) {
+        current = await api.beginIssueToPrRepair(run.runId);
+        onProgress(current);
+        const failingLocalChecks = current.checks.filter((check) => !check.passed)
+          .map((check) => ({ label: check.label, command: check.command, code: check.code, output: check.outputExcerpt }));
+        const lastCi = current.ciHistory.at(-1);
+        const reviewThreads = current.prNumber
+          ? await githubReviewThreads(current.worktreeId, current.prNumber).catch(() => null)
+          : null;
+        const repairEvidence = JSON.stringify({
+          failingLocalChecks,
+          ciHead: lastCi?.headOid ?? null,
+          ciVerdict: lastCi?.verdict ?? null,
+          ciChecks: lastCi?.checks.filter((check) => !["SUCCESS", "SKIPPED", "NEUTRAL"].includes(check.conclusion)) ?? [],
+          reviewThreads,
+        }).slice(0, 12_000);
+        const result = await (autonomousIssueRunner ?? runIssueToPrAgent)({
+          runId: current.runId,
+          agentRunId: current.runId + "-repair-" + current.repairAttempts,
+          repositorySlug: current.repositorySlug,
+          issueNumber: current.issueNumber,
+          issueTitle: current.issueTitle,
+          issueBody: current.issueBody,
+          branch: current.branch,
+          baseRef: current.baseRef,
+          worktreeId: current.worktreeId,
+          workspaceLabel: current.workspaceLabel,
+          signal: controller.signal,
+          repairEvidence,
+          onToolActivity: (activity) =>
+            set((state) => ({ activityByRun: { ...state.activityByRun, [current.runId]: activity } })),
+        });
+        if (controller.signal.aborted) return;
+        current = await api.getIssueToPrStatus(current.runId);
+        if (current.status === "opening_pr") return;
+        if (current.status === "repairing" && result.outcome === "completed") {
+          // Fallback for older model runtimes with no coordinator verification node.
+          current = await api.runIssueToPrChecks(current.runId);
+        }
+        if (current.status !== "repairing") return;
+      }
+    } catch (error) {
+      const latest = await api.getIssueToPrStatus(run.runId).catch(() => null);
+      if (latest?.status === "repairing") {
+        await api.advanceIssueToPr(run.runId, "failed", { error: "Repair stopped: " + errorText(error) }).catch(() => {});
+      }
+    } finally {
+      controllers.delete(run.runId);
+    }
+  }
+
   const onProgress = (run: IssueToPrRun) => {
     set((state) => ({ runs: upsertRun(state.runs, run) }));
+    if (run.status === "monitoring_ci") scheduleCiPoll(run.runId);
+    if (run.status === "repairing" && !controllers.has(run.runId)) void driveRepair(run);
+    if (isTerminalIssueToPrStatus(run.status) || run.status === "ready") {
+      const timer = monitorTimers.get(run.runId);
+      if (timer) clearTimeout(timer);
+      monitorTimers.delete(run.runId);
+    }
     if (isTerminalIssueToPrStatus(run.status)) {
       controllers.delete(run.runId);
       set((state) => {
@@ -114,6 +202,12 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         return;
       }
       const coordinatorOutcome = "task" in result ? (result as { task?: { outcome?: string } }).task?.outcome : undefined;
+      const latest = await api.getIssueToPrStatus(run.runId);
+      if (latest.status === "repairing") {
+        void driveRepair(latest);
+        return;
+      }
+      if (latest.status === "opening_pr" || latest.status === "failed" || latest.status === "cancelled") return;
       if (coordinatorOutcome === "WAITING_USER" || coordinatorOutcome === "WAITING_APPROVAL") {
         await api.advanceIssueToPr(run.runId, "opening_pr");
         return;
@@ -134,7 +228,8 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           .advanceIssueToPr(run.runId, "implementing", { durableRunId: result.durableRunId })
           .catch(() => {});
       }
-      await api.runIssueToPrChecks(run.runId);
+      const checked = await api.runIssueToPrChecks(run.runId);
+      if (checked.status === "repairing") void driveRepair(checked);
     } catch (error) {
       await api.advanceIssueToPr(run.runId, "failed", { error: errorText(error) }).catch(() => {});
     } finally {
@@ -151,7 +246,15 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
    * call racing this one can never double-drive the same run. */
   const resumeOrphanedRun = (run: IssueToPrRun): void => {
     if (controllers.has(run.runId) || isTerminalIssueToPrStatus(run.status)) return;
-    if (run.status === "opening_pr" || run.status === "awaiting_review") {
+    if (run.status === "monitoring_ci") {
+      scheduleCiPoll(run.runId, 1_000);
+      return;
+    }
+    if (run.status === "repairing") {
+      void driveRepair(run);
+      return;
+    }
+    if (run.status === "opening_pr" || run.status === "awaiting_review" || run.status === "ready") {
       // Waiting on a human action (push+open-PR, or mark-done) in the panel
       // — nothing to re-drive.
       return;
@@ -165,7 +268,10 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           // mutation — the list snapshot this loop iterated over can be
           // stale by the time this async resume actually runs.
           const latest = await api.getIssueToPrStatus(run.runId).catch(() => run);
-          if (latest.status === "checking") await api.runIssueToPrChecks(run.runId);
+          if (latest.status === "checking") {
+            const checked = await api.runIssueToPrChecks(run.runId);
+            if (checked.status === "repairing") void driveRepair(checked);
+          }
         } catch (error) {
           await api.advanceIssueToPr(run.runId, "failed", { error: errorText(error) }).catch(() => {});
         } finally {
@@ -215,9 +321,10 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
     selectRun: (runId) => set({ selectedRunId: runId }),
 
-    start: (issueUrl) =>
+    start: (issueUrl, maxRepairAttempts = 2) =>
       perform("start", async () => {
-        const run = await api.startIssueToPr(issueUrl);
+        const initial = await api.startIssueToPr(issueUrl);
+        const run = await api.setIssueToPrRepairLimit(initial.runId, maxRepairAttempts);
         set((state) => ({ runs: upsertRun(state.runs, run), selectedRunId: run.runId }));
         void driveRun(run);
         return run;
@@ -232,8 +339,9 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
     markPrOpened: (runId, prNumber, prUrl) =>
       perform(`pr:${runId}`, async () => {
-        const run = await api.advanceIssueToPr(runId, "awaiting_review", { prNumber, prUrl });
+        const run = await api.advanceIssueToPr(runId, "monitoring_ci", { prNumber, prUrl });
         set((state) => ({ runs: upsertRun(state.runs, run) }));
+        scheduleCiPoll(run.runId, 1_000);
       }),
 
     markDone: (runId) =>
