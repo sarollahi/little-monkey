@@ -145,3 +145,14 @@ numbers after an exclusive cursor, it reports the exact gap and refuses to
 splice untrusted or incomplete stream content onto a previous answer. Approval,
 pause, reconnect and reconciliation states are derived from the existing run
 record and typed run events, not from client-local execution state.
+
+## Multiple simultaneous observers
+
+Only an **originating** desktop turn writes streamed transcript snapshots.
+Reattached observers update their own in-memory view without emitting another
+`sessions_save`; the run ledger remains the authoritative durable record.
+This prevents a second window watching the same run from overwriting the
+originating window's still-streaming session snapshot. It does **not** make
+arbitrary simultaneous user edits from different windows transactionally
+conflict-free. An observer reattaches from the ledger on a subsequent startup
+instead of treating a UI-only snapshot as a saved result.

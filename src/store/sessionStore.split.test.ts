@@ -441,3 +441,29 @@ describe("read-only shell for a daemon turn whose first desktop save was lost", 
     )?.recoveryOnly).toBe(true);
   });
 });
+
+describe("watcher-only session transcript updates", () => {
+  it("renders and patches transient observation rows without a disk write", () => {
+    seed();
+    useSessionStore.getState().addMessage("a", {
+      role: "assistant", content: "observing",
+      durableTurn: { turnId: "t", runId: "r" },
+    }, true);
+    useSessionStore.getState().updateMessageAt("a", 0, {
+      content: "observed result",
+    }, true);
+    expect(useSessionStore.getState().sessions.find(s => s.id === "a")?.messages[0].content)
+      .toBe("observed result");
+    expect(invokeMock).not.toHaveBeenCalledWith("sessions_save", expect.anything());
+  });
+
+  it("does not discard an empty recovery-only shell when New Session is clicked", () => {
+    seed();
+    expect(useSessionStore.getState().recoverMissingDaemonSession("recovery-1")).toBe(true);
+    useSessionStore.getState().switchSession("recovery-1");
+    useSessionStore.getState().newSession();
+    expect(useSessionStore.getState().sessions.some(
+      s => s.id === "recovery-1" && s.recoveryOnly,
+    )).toBe(true);
+  });
+});

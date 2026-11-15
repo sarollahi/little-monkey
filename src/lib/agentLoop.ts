@@ -2013,7 +2013,7 @@ async function attachDaemonTurnToChat(
           activeRunId = updated.runId;
           useSessionStore.getState().updateMessageAt(link.sessionId, link.assistantIndex, {
             durableTurn: { turnId: updated.turnId, runId: updated.runId },
-          });
+          }, observer);
           if (observer) recoveredObserverRuns.set(link.sessionId, updated.runId);
         }
       },
@@ -2021,21 +2021,21 @@ async function attachDaemonTurnToChat(
         latestContent = daemonProjectionContent(next);
         useSessionStore.getState().updateMessageAt(link.sessionId, link.assistantIndex, {
           content: latestContent,
-        });
+        }, observer);
       },
     }, !observer);
     terminal = projection.terminal;
     latestContent = daemonProjectionContent(projection);
     useSessionStore.getState().updateMessageAt(link.sessionId, link.assistantIndex, {
       content: latestContent,
-    });
+    }, observer);
   } catch (error) {
     const message = errorMessage(error);
     useSessionStore.getState().updateMessageAt(link.sessionId, link.assistantIndex, {
       content: link.output
         ? `${link.output}\n\n[Lost connection to resident run: ${message}]`
         : `[Lost connection to resident run: ${message}]`,
-    });
+    }, observer);
     // Keep the link: a later app start can replay all durable events after
     // the last committed sequence instead of treating a transient IPC/SQLite
     // failure as terminal.
@@ -2491,7 +2491,7 @@ export function recoverDaemonDesktopTurns(): void {
           useSessionStore.getState().addMessage(session.id, {
             role: 'assistant', content: 'Reconnecting to the resident runner…',
             durableTurn: { turnId: turn.source_event_id, runId: turn.run_id },
-          });
+          }, true);
         }
         const link: ActiveDaemonDesktopTurn = {
           sessionId: session.id,

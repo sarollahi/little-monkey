@@ -611,7 +611,7 @@ export interface SessionStore {
   /** Append a new message (user, assistant, or tool) to `sessionId`'s
    * transcript. No-ops if the session no longer exists (deleted while a
    * turn was still streaming into it) — as do all mutators below. */
-  addMessage: (sessionId: string, msg: ChatMessage) => void;
+  addMessage: (sessionId: string, msg: ChatMessage, transient?: boolean) => void;
   /**
    * Shallow-merge `patch` into the last message of `sessionId`'s
    * transcript. Used by the agent loop to stream assistant content/tool_calls
@@ -622,7 +622,7 @@ export interface SessionStore {
   /** Shallow-merge `patch` into the message at `index` of `sessionId`'s
    * transcript. Used by the checkpoint notice's Revert button to
    * mark itself reverted in place. No-ops if `index` is out of range. */
-  updateMessageAt: (sessionId: string, index: number, patch: Partial<ChatMessage>) => void;
+  updateMessageAt: (sessionId: string, index: number, patch: Partial<ChatMessage>, transient?: boolean) => void;
   /** Drops the last message of `sessionId`'s transcript. Used to
    * clean up an empty assistant placeholder left behind when the Stop
    * button cancels a turn before any content streamed in. No-ops if the
@@ -1994,6 +1994,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => {
       const sessions =
         active && active.messages.length === 0 && active.comparisonBranch === null && !active.crewRun
+          && !active.recoveryOnly
           ? s.sessions.map((sess) => (sess.id === active.id ? session : sess))
           : [...s.sessions, session];
       persist(sessions, session.id, s.groups);
@@ -2695,7 +2696,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set({ renameRequestId: null });
   },
 
-  addMessage: (sessionId, msg) => {
+  addMessage: (sessionId, msg, transient = false) => {
     set((state) => {
       const target = state.sessions.find((s) => s.id === sessionId);
       if (!target) return state;
@@ -2721,7 +2722,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         session.id === sessionId ? { ...session, messages, title, updatedAt: now } : session
       );
 
-      persist(sessions, state.activeSessionId, state.groups);
+      if (!transient) persist(sessions, state.activeSessionId, state.groups);
       return withMirror(state, sessionId, { sessions }, messages);
     });
   },
@@ -2736,13 +2737,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     });
   },
 
-  updateMessageAt: (sessionId, index, patch) => {
+  updateMessageAt: (sessionId, index, patch, transient = false) => {
     set((state) => {
       const target = state.sessions.find((s) => s.id === sessionId);
       if (!target || index < 0 || index >= target.messages.length) {
         return state;
       }
-      return applyMessagePatch(state, sessionId, index, patch);
+      return applyMessagePatch(state, sessionId, index, patch, !transient);
     });
   },
 
@@ -2827,7 +2828,8 @@ function applyMessagePatch(
   state: SessionStore,
   sessionId: string,
   index: number,
-  patch: Partial<ChatMessage>
+  patch: Partial<ChatMessage>,
+  persistWrite = true,
 ): Partial<SessionStore> {
   const now = Date.now();
   let updatedMessages: ChatMessage[] = [];
@@ -2841,6 +2843,6 @@ function applyMessagePatch(
     return { ...session, messages, updatedAt: now };
   });
 
-  persist(sessions, state.activeSessionId, state.groups);
+  if (persistWrite) persist(sessions, state.activeSessionId, state.groups);
   return withMirror(state, sessionId, { sessions }, updatedMessages);
 }
