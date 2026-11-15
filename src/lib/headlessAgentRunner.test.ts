@@ -416,6 +416,22 @@ describe('runHeadlessAgent', () => {
     expect(result.evidence.executedTools).toEqual(['read_file', 'read_file']);
     expect(recorder.fail).toHaveBeenCalledWith(result.summary);
   });
+  it('rechecks the durable budget before each model request and prevents overspend after a prior turn', async () => {
+    mocks.attemptStream.mockResolvedValueOnce({
+      content: '', toolCalls: [toolCall('read_file')], streamError: null, contentStarted: true,
+      usage: { promptTokens: 20, completionTokens: 10 },
+    });
+    mocks.executeToolCall.mockResolvedValueOnce('{"ok":true}');
+    const beforeModelRequest = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Frozen issue token budget exhausted'));
+    const result = await runHeadlessAgent(baseParams({ beforeModelRequest, onUsage: vi.fn() }));
+    expect(result.outcome).toBe('error');
+    expect(result.summary).toContain('budget exhausted');
+    expect(beforeModelRequest).toHaveBeenCalledTimes(2);
+    expect(mocks.attemptStream).toHaveBeenCalledTimes(1);
+  });
+
   it('charges provider token usage before any requested external tool executes', async () => {
     mocks.attemptStream.mockResolvedValueOnce({
       content: '', toolCalls: [toolCall('run_shell')], streamError: null,
