@@ -730,11 +730,18 @@ export async function watchDaemonDesktopTurn(
   const watched = new Set<string>([link.runId]);
   let lastHoldLookupMs = 0;
   let heldDetail: string | null = null;
-  let cancelSent = false;
+  let consecutiveReadFailures = 0;
+  let cancelAcknowledged = false;
+  let cancelInFlight = false;
+  let lastCancelAttemptMs = 0;
   const requestCancel = () => {
-    if (cancelSent) return;
-    cancelSent = true;
-    void daemonCancel(link.runId, "Stopped from desktop chat").catch(() => undefined);
+    if (cancelAcknowledged || cancelInFlight) return;
+    cancelInFlight = true;
+    lastCancelAttemptMs = Date.now();
+    void daemonCancel(link.runId, "Stopped from desktop chat")
+      .then(() => { cancelAcknowledged = true; })
+      .catch(() => undefined)
+      .finally(() => { cancelInFlight = false; });
   };
   if (cancelOnAbort) {
     signal.addEventListener("abort", requestCancel, { once: true });
@@ -743,10 +750,30 @@ export async function watchDaemonDesktopTurn(
   try {
     for (;;) {
       if (signal.aborted && !cancelOnAbort) return projection;
-      const [events, run] = await Promise.all([
-        loadRunEvents(link.runId, link.lastSequence, 1_000),
-        getRun(link.runId),
-      ]);
+      // Stop intent is an idempotent daemon control. A lost IPC response does
+      // not prove the cancellation was accepted; retry under the same run ID.
+      if (signal.aborted && cancelOnAbort && !cancelAcknowledged &&
+          Date.now() - lastCancelAttemptMs >= 2_000) requestCancel();
+      let events: RunEventEnvelopeWire[];
+      let run: RunRecord | null;
+      try {
+        [events, run] = await Promise.all([
+          loadRunEvents(link.runId, link.lastSequence, 1_000),
+          getRun(link.runId),
+        ]);
+        consecutiveReadFailures = 0;
+      } catch (error) {
+        // No new turn, no cursor advance, no tool replay. A daemon restart or
+        // SQLite lock is a transient observation failure, not a failed run.
+        consecutiveReadFailures++;
+        projection = {
+          ...projection,
+          status: `Reconnecting to resident runner (attempt ${consecutiveReadFailures}): ${String(error)}`,
+        };
+        callbacks.onProjection(projection);
+        await wait(Math.min(5_000, 250 * 2 ** Math.min(consecutiveReadFailures, 5)));
+        continue;
+      }
       projection = projectDaemonTurnEvents(projection, events, run);
       link = { ...link, lastSequence: projection.lastSequence, output: projection.output };
       saveActiveDaemonTurn(link);

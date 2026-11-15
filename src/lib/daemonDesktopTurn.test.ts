@@ -398,6 +398,27 @@ describe("daemon desktop routing and event replay", () => {
     expect(mocks.daemonDecisions).not.toHaveBeenCalled();
   });
 
+  it("reconnects after a lost read without re-submitting or duplicating events", async () => {
+    mocks.loadRunEvents.mockRejectedValueOnce(new Error("daemon restarted"))
+      .mockResolvedValue([{ sequence: 9, event: {
+        type: "completed", payload: { summary: "existing result" },
+      } }] as RunEventEnvelopeWire[]);
+    mocks.getRun.mockResolvedValue({ status: "succeeded" } as RunRecord);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const statuses: string[] = [];
+    const result = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1, lastSequence: 8, output: "" },
+      new AbortController().signal,
+      { onProjection: p => statuses.push(p.status) },
+      false,
+    );
+    expect(statuses.some(s => s.includes("Reconnecting to resident runner"))).toBe(true);
+    expect(result).toMatchObject({ terminal: true, lastSequence: 9, summary: "existing result" });
+    expect(mocks.loadRunEvents).toHaveBeenCalledTimes(2);
+    expect(mocks.loadRunEvents).toHaveBeenCalledWith("r", 8, 1_000);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
   it("detaches a recovered observer without cancelling daemon-owned execution", async () => {
     const controller = new AbortController();
     controller.abort();
