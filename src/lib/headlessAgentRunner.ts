@@ -80,6 +80,8 @@ export interface RunHeadlessAgentParams {
   maxWallTimeMs?: number;
   /** Durable usage accounting before a model can execute tool calls. */
   onUsage?: (usageId: string, inputTokens: number, outputTokens: number) => Promise<void>;
+  /** Re-read the frozen remaining budget before EACH model request. */
+  beforeModelRequest?: () => Promise<void>;
   /** Defaults to `code`; use `explore` for analysis-only agents so mutating
    * tools are absent from both the model schema and durable workspace policy. */
   toolProfile?: 'explore' | 'code';
@@ -211,6 +213,8 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
       : null;
 
     for (let iteration = 0; iteration < params.maxIterations; iteration++) {
+      if (signal.aborted) return finish(budgetController.signal.aborted ? 'error' : 'cancelled', budgetController.signal.aborted ? 'Agent wall-time budget exhausted.' : CANCELLED_SUMMARY);
+      await params.beforeModelRequest?.();
       if (signal.aborted) return finish(budgetController.signal.aborted ? 'error' : 'cancelled', budgetController.signal.aborted ? 'Agent wall-time budget exhausted.' : CANCELLED_SUMMARY);
 
       const wireHistory: ChatMessage[] = [
