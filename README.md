@@ -83,7 +83,7 @@ Nothing reaches a runtime without passing the middle row. That is the whole desi
 
 ## Release acceptance status
 
-The [release-readiness audit](docs/release-readiness-2026-11-15.md) and
+The [active security release blockers](docs/security-release-blockers-2026-11-15.md) include unresolved RustSec vulnerabilities. These are not waived by a successful installer smoke test. The [release-readiness audit](docs/release-readiness-2026-11-15.md) and
 [physical acceptance procedure](docs/release-acceptance.md) identify which
 checks must pass before the next release. Candidate package checks and an
 opt-in real-model/daemon first-run harness are available, but neither proves
