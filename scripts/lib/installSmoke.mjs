@@ -238,5 +238,9 @@ export function formatLeg(name, { outcome, reason }) {
  * between "we know this is not covered here" and "we think this is covered".
  */
 export function exitCodeFor(legs, { requireClean = false } = {}) {
-  return legs.some((leg) => leg.outcome === OUTCOME.Fail) ? 1 : 0;
+  if (legs.some((leg) => leg.outcome === OUTCOME.Fail)) return 1;
+  // Release jobs must not turn a missing artifact into a green required gate.
+  // Ad-hoc runs still report SKIPPED for genuinely inapplicable checks.
+  if (requireClean && legs[0]?.outcome !== OUTCOME.Pass) return 1;
+  return 0;
 }
