@@ -53,7 +53,8 @@ describe('authoritative session recovery selection', () => {
     ];
     expect(durableAssistantIndex(history,'turn-1','run-1')).toBe(2);
     expect(durableAssistantIndex(history,'turn-1','run-2')).toBe(3);
-    expect(durableAssistantIndex(history,'turn-2','run-1')).toBeNull();
+    expect(durableAssistantIndex(history,'turn-2','run-1')).toBe(2);
+    expect(durableAssistantIndex(history,'turn-1','run-3')).toBeNull();
   });
 
   it('never sends local durable run IDs as model message attributes', () => {

@@ -1983,9 +1983,21 @@ async function attachDaemonTurnToChat(
 ): Promise<void> {
   let latestContent = link.output || '⏳ Reconnecting to the resident runner…';
   let terminal = false;
+  let activeRunId = link.runId;
   try {
     const projection = await watchDaemonDesktopTurn(link, controller.signal, {
-      onLinkChanged: saveActiveDaemonTurn,
+      onLinkChanged: (updated) => {
+        saveActiveDaemonTurn(updated);
+        if (activeRunId !== updated.runId) {
+          // Corrective/resumed continuations have new run IDs but still
+          // answer the same transcript row. Persist the updated provenance.
+          activeRunId = updated.runId;
+          useSessionStore.getState().updateMessageAt(link.sessionId, link.assistantIndex, {
+            durableTurn: { turnId: updated.turnId, runId: updated.runId },
+          });
+          if (observer) recoveredObserverRuns.set(link.sessionId, updated.runId);
+        }
+      },
       onProjection: (next) => {
         latestContent = daemonProjectionContent(next);
         useSessionStore.getState().updateMessageAt(link.sessionId, link.assistantIndex, {
@@ -2013,7 +2025,7 @@ async function attachDaemonTurnToChat(
     // Only terminal runs are removed by the successful path. A stopped UI
     // controller can return before the daemon commits Cancelled, so preserve
     // its link for startup recovery in that case.
-    if (terminal) removeActiveDaemonTurn(link.runId);
+    if (terminal) removeActiveDaemonTurn(activeRunId);
   }
 }
 

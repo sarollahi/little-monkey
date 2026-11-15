@@ -32,10 +32,13 @@ export function latestRecoverableTurns(
 export function durableAssistantIndex(
   messages: readonly ChatMessage[], turnId: string, runId: string,
 ): number | null {
+  void turnId; // Kept in the public signature for original-turn provenance.
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
-    if (message.role === 'assistant' && message.durableTurn?.turnId === turnId
-        && message.durableTurn.runId === runId) return index;
+    // A durable mutation-correction continuation can share the original
+    // transcript row but have its own source event ID. Run IDs are globally
+    // unique and are the stable projection identity; match that first.
+    if (message.role === 'assistant' && message.durableTurn?.runId === runId) return index;
   }
   return null;
 }
