@@ -1161,6 +1161,66 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
     Ok(run)
 }
 
+/// Returns only a single draft PR on this repository's exact owned branch,
+/// base branch and local HEAD. A same-named fork or stale/ready-for-review PR
+/// cannot be adopted as the run's remotely-created draft.
+fn find_matching_owned_draft_pr(
+    entries: &[Value],
+    run: &IssueToPrRun,
+    head_oid: &str,
+) -> Result<Option<(u32, String)>, String> {
+    let mut match_found = None;
+    for entry in entries {
+        let matches = entry.get("draft").and_then(Value::as_bool) == Some(true)
+            && entry.get("state").and_then(Value::as_str) == Some("open")
+            && entry.pointer("/head/ref").and_then(Value::as_str) == Some(run.branch.as_str())
+            && entry.pointer("/head/sha").and_then(Value::as_str) == Some(head_oid)
+            && entry.pointer("/head/repo/full_name").and_then(Value::as_str) == Some(run.repository_slug.as_str())
+            && entry.pointer("/base/ref").and_then(Value::as_str) == Some(run.base_ref.as_str())
+            && entry.pointer("/base/repo/full_name").and_then(Value::as_str) == Some(run.repository_slug.as_str());
+        if !matches { continue; }
+        let number = entry.get("number").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()).filter(|n| *n != 0)
+            .ok_or_else(|| "GitHub returned an invalid matching PR number".to_string())?;
+        let url = format!("https://github.com/{}/pull/{number}", run.repository_slug);
+        if match_found.is_some() {
+            return Err("Multiple matching owned draft PRs exist; manual reconciliation required".to_string());
+        }
+        match_found = Some((number, url));
+    }
+    Ok(match_found)
+}
+
+/// Recover the identity of a PR already created by an approved GitHub write
+/// if the desktop crashed between GitHub success and local record persistence.
+/// Read-only GitHub discovery; never creates, pushes, merges or changes PRs.
+#[tauri::command]
+pub fn issue_to_pr_reconcile_pr(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path);
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "opening_pr" || run.pr_number.is_some() { return Ok(run); }
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    if inspection.dirty || inspection.worktree.marker.repository_slug != run.repository_slug
+        || inspection.worktree.marker.branch != run.branch
+    {
+        return Ok(run); // Uncommitted or non-owned work cannot prove a remote PR identity.
+    }
+    let endpoint = format!("repos/{}/pulls?state=open&per_page=100", run.repository_slug);
+    let entries = m5_delivery::m5_github_api_get_paginated(&endpoint, 400)?;
+    if let Some((number, url)) = find_matching_owned_draft_pr(&entries, &run, &inspection.head_oid)? {
+        run.pr_number = Some(number);
+        run.pr_url = Some(url);
+        run.status = "monitoring_ci".to_string();
+        run.updated_at_ms = now_ms()?;
+        runs.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &runs)?;
+        emit_progress(&app, &run);
+    }
+    Ok(run)
+}
+
 #[tauri::command]
 pub fn issue_to_pr_cancel(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
