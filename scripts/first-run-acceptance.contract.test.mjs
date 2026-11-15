@@ -31,7 +31,9 @@ function fixture(t) {
   return dir;
 }
 function invoke(dir, mode, name, extra = []) {
-  const path = join(dir, name);
+  // Keep evidence under Git private metadata: outputs must not become changes
+  // inside the disposable fixture that the scope oracle mistakes for agent edits.
+  const path = join(dir, ".git", name);
   const args = [runner, mode, "--workspace", dir, "--output", path,
     ...(mode === "verify" ? ["--model", "example-model", "--runtime", "local-runtime",
       "--app-version", "1.12.0", "--attempts", "1"] : []), ...extra];
@@ -100,7 +102,7 @@ test("evidence records cannot silently overwrite an earlier run", (t) => {
   const once = invoke(dir, "baseline", "baseline.json");
   assert.equal(once.result.status, 0);
   const again = run(process.execPath, [runner, "baseline", "--workspace", dir,
-    "--output", join(dir, "baseline.json")], root);
+    "--output", join(dir, ".git", "baseline.json")], root);
   assert.equal(again.status, 1);
   assert.match(again.stderr, /EEXIST/);
 });
