@@ -31,6 +31,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Reclaim space for actual candidate plus previous installer
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
       - name: Host prerequisites for real Tauri package build
         shell: bash
         run: |
@@ -99,22 +104,88 @@ jobs:
         shell: bash
         run: node scripts/install-smoke.mjs --artifacts artifacts --require-clean
 
-      - name: Install candidate through apt package manager in disposable runner
+      - name: Download and verify the latest published older x64 Debian package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          package="$(find artifacts -maxdepth 1 -name '*.deb' -type f -print -quit)"
-          test -n "$package"
-          sudo apt-get install -y "./$package"
-          package_name="$(dpkg-deb -f "$package" Package)"
-          dpkg-query -W "$package_name" | tee evidence/installed-package.txt
-          dpkg --verify "$package_name" > evidence/dpkg-verify.txt
-          if [ -s evidence/dpkg-verify.txt ]; then
-            echo "Installed Debian package verification reported differences" >&2
-            cat evidence/dpkg-verify.txt
+          current="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          gh release list --limit 40 --json tagName,isDraft,isPrerelease > evidence/release-list.json
+          PREVIOUS_VERSION="$(node -e '
+            const fs=require("node:fs");
+            const current=process.argv[1].split(".").map(Number);
+            const compare=(a,b)=>{for(let i=0;i<3;i++){if(a[i]!==b[i])return a[i]-b[i]}return 0};
+            const releases=JSON.parse(fs.readFileSync("evidence/release-list.json","utf8"));
+            const viable=releases.filter(x=>!x.isDraft&&!x.isPrerelease&&/^\\d+\\.\\d+\\.\\d+$/.test(x.tagName))
+              .filter(x=>compare(x.tagName.split(".").map(Number),current)<0)
+              .sort((a,b)=>compare(b.tagName.split(".").map(Number),a.tagName.split(".").map(Number)));
+            process.stdout.write(viable[0]?.tagName||"");
+          ' "$current")"
+          if [ -z "$PREVIOUS_VERSION" ]; then
+            echo "Cannot demonstrate a real cross-version upgrade: no older published release" >&2
             exit 1
           fi
-          echo "PASS: apt installed the actual candidate package on Ubuntu runner" | tee evidence/install-result.txt
+          echo "PREVIOUS_VERSION=$PREVIOUS_VERSION" >> "$GITHUB_ENV"
+          mkdir -p previous
+          gh release download "$PREVIOUS_VERSION" --dir previous --pattern '*amd64.deb'
+          gh api "repos/${{ github.repository }}/releases/tags/$PREVIOUS_VERSION" > evidence/previous-release-metadata.json
+          node scripts/release-asset-integrity.mjs \
+            --metadata evidence/previous-release-metadata.json \
+            --artifacts previous | tee evidence/previous-digest-check.txt
+
+      - name: Actually install previous published version through apt
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$(find previous -maxdepth 1 -name '*.deb' -type f -print -quit)"
+          test -n "$file"
+          echo "Previous package: $file" | tee evidence/previous-package.txt
+          sudo apt-get install -y "./$file"
+          package_name="$(dpkg-deb -f "$file" Package)"
+          expected="$(dpkg-deb -f "$file" Version)"
+          actual="$(dpkg-query -W -f='${Version}' "$package_name")"
+          test "$actual" = "$expected"
+          printf '%s\\n' "$package_name" > evidence/package-name.txt
+          echo "$actual" > evidence/previous-installed-version.txt
+          mkdir -p "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app"
+          # Synthetic canary: package-manager data retention ONLY. This is
+          # not proof that live user session databases migrated successfully.
+          printf 'acceptance-canary-%s\\n' "$GITHUB_SHA" > "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app/canary.txt"
+          sha256sum "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app/canary.txt" > evidence/data-canary-before.txt
+
+      - name: Actually upgrade to candidate and verify installed version and canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$(find artifacts -maxdepth 1 -name '*.deb' -type f -print -quit)"
+          test -n "$file"
+          sudo apt-get install -y "./$file"
+          package_name="$(cat evidence/package-name.txt)"
+          expected="$(dpkg-deb -f "$file" Version)"
+          actual="$(dpkg-query -W -f='${Version}' "$package_name")"
+          test "$actual" = "$expected"
+          echo "$actual" > evidence/candidate-installed-version.txt
+          (cd "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app" && sha256sum -c "$GITHUB_WORKSPACE/evidence/data-canary-before.txt") 2>&1 | tee evidence/upgrade-canary-check.txt
+          # sha256sum -c uses the original absolute pathname recorded before
+          # the upgrade; it checks unchanged bytes, not app DB migration.
+          dpkg --verify "$package_name" > evidence/dpkg-verify.txt
+          test ! -s evidence/dpkg-verify.txt
+
+      - name: Roll back the package with apt and verify exact older version
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="$(find previous -maxdepth 1 -name '*.deb' -type f -print -quit)"
+          test -n "$file"
+          sudo apt-get install -y --allow-downgrades "./$file"
+          package_name="$(cat evidence/package-name.txt)"
+          expected="$(dpkg-deb -f "$file" Version)"
+          actual="$(dpkg-query -W -f='${Version}' "$package_name")"
+          test "$actual" = "$expected"
+          echo "$actual" > evidence/rolled-back-package-version.txt
+          sha256sum -c evidence/data-canary-before.txt | tee evidence/rollback-canary-check.txt
+          echo "PASS: real apt install, cross-version upgrade and apt downgrade; GUI and in-app updater rollback remain UNVERIFIED" | tee evidence/install-result.txt
 
       - name: Preserve exact candidate evidence, even after failure
         if: always()
@@ -126,5 +197,7 @@ jobs:
           retention-days: 7
 
       # The .deb is intentionally NOT attached to a public release.
-      # This hosted-runner test does NOT prove a graphical first-run, an
-      # upgrade from a different version, a rollback, or non-Linux hosts.
+      # This hosted-runner test proves a Debian package-manager install,
+      # version upgrade and apt downgrade only if all commands pass.
+      # It does NOT prove the signed in-app updater's rollback script,
+      # application DB migration, real GUI first run or other OSes.
