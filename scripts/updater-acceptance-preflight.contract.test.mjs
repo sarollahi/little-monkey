@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const script = fileURLToPath(new URL('./updater-acceptance-preflight.mjs', import.meta.url));
 const signature = Buffer.from('untrusted comment: signature from test key\nRWtest\ntrusted comment: timestamp:1\nRWtest\n').toString('base64');
 const entry = {
-  url: 'https://github.com/AA-Box/little-monkey/releases/download/1.10.0/Little.Monkey_aarch64.app.tar.gz',
+  url: 'https://github.com/sarollahi/little-monkey/releases/download/1.10.0/Little.Monkey_aarch64.app.tar.gz',
   signature,
 };
 
@@ -54,7 +54,7 @@ test('malformed release version produces a structured failure', () => {
 
 test('requires an updater artifact on the exact release', () => {
   const result = run(manifest({ platforms: { 'darwin-aarch64': {
-    ...entry, url: 'https://github.com/AA-Box/little-monkey/releases/download/1.10.0/download.zip',
+    ...entry, url: 'https://github.com/sarollahi/little-monkey/releases/download/1.10.0/download.zip',
   } } }));
   assert.equal(result.status, 1);
   assert.equal(result.output.code, 'ARTIFACT_URL_INVALID');
