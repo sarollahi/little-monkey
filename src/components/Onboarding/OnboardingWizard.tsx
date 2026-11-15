@@ -21,6 +21,7 @@ import { ProviderCard } from "../Settings/ProviderCard";
 import { AddCustomProviderForm } from "../Settings/AddCustomProviderForm";
 import { ONBOARDING_STEPS, useOnboardingStore } from "../../store/onboardingStore";
 import { useModelStore } from "../../store/modelStore";
+import { useRuntimeHubStore } from "../../store/runtimeHubStore";
 import { primaryRoot, useWorkspaceStore } from "../../store/workspaceStore";
 import { usePermissionStore, type PermissionMode } from "../../store/permissionStore";
 import {
@@ -154,14 +155,47 @@ function ModelStep() {
   const { t } = useT();
   const providers = useModelStore((s) => s.providers);
   const refreshProviders = useModelStore((s) => s.refreshProviders);
+  const hardware = useRuntimeHubStore((s) => s.hardware);
+  const hardwareError = useRuntimeHubStore((s) => s.errors.overview);
+  const refreshHardware = useRuntimeHubStore((s) => s.refreshOverview);
+  const mlxAvailable = Boolean(hardware?.platform.os === "macos"
+    && hardware.platform.arch === "aarch64"
+    && hardware.platform.accelerators.some((gpu) => gpu.kind === "metal" && gpu.available));
 
   useEffect(() => {
     void refreshProviders();
-  }, [refreshProviders]);
+    // Reuse the real Runtime Hub/Driver Doctor hardware probe instead of
+    // guessing from the browser user agent or promising GPU support.
+    if (!useRuntimeHubStore.getState().hardware) {
+      void refreshHardware().catch(() => {});
+    }
+  }, [refreshProviders, refreshHardware]);
 
   return (
     <>
       <p className="text-sm text-muted">{t("Onboarding.modelIntro")}</p>
+      {hardware ? (
+        <div role="status" className="rounded-lg border border-border bg-background p-3 text-xs text-muted">
+          <p className="font-semibold text-foreground">Detected hardware: {hardware.platform.os} / {hardware.platform.arch}</p>
+          <p>Supported local runtime types reported by this host: {hardware.platform.supported_runtimes.join(", ") || "none detected"}.
+            A supported runtime still needs a compatible model and working driver.</p>
+          {!mlxAvailable && (
+            <p className="mt-1 text-warning">MLX is unavailable on this hardware. It requires Apple Silicon with Metal.
+              Use a supported llama.cpp or Ollama model, or configure a cloud provider.</p>
+          )}
+          {hardware.available_ram_bytes < 4 * 1024 ** 3 && (
+            <p className="mt-1 text-warning">Less than 4 GiB of RAM is available. A local model may fail to load;
+              select a smaller model or a cloud provider before starting a coding task.</p>
+          )}
+        </div>
+      ) : hardwareError ? (
+        <p role="alert" className="text-xs text-warning">
+          Hardware detection failed: {hardwareError}. Local model compatibility is unverified;
+          check Settings → Runtime Hub → Overview before downloading model weights.
+        </p>
+      ) : (
+        <p role="status" className="text-xs text-faint">Checking hardware compatibility…</p>
+      )}
 
       <section>
         <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-faint">{t("Onboarding.modelLocalHeading")}</h3>
