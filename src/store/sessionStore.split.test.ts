@@ -404,3 +404,40 @@ describe("hydrateSessions attachedStackIds default", () => {
     ]);
   });
 });
+
+describe("read-only shell for a daemon turn whose first desktop save was lost", () => {
+  it("recreates one stable identity without borrowing the current workspace or persona", async () => {
+    seed();
+    const store = useSessionStore.getState();
+    expect(store.recoverMissingDaemonSession("crashed-session-1")).toBe(true);
+    expect(store.recoverMissingDaemonSession("crashed-session-1")).toBe(true);
+    const recovered = useSessionStore.getState().sessions.filter(
+      s => s.id === "crashed-session-1"
+    );
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      recoveryOnly: true,
+      workspacePath: null,
+      modelTarget: null,
+      personaId: null,
+      messages: [],
+    });
+    expect(useSessionStore.getState().activeSessionId).toBe("a");
+    expect(useSessionStore.getState().recoverMissingDaemonSession("../invalid")).toBe(false);
+
+    // Its incomplete state survives the same JSON normalization as all
+    // regular session records, including a cold app restart.
+    const snapshot = JSON.stringify({
+      sessions: useSessionStore.getState().sessions,
+      activeSessionId: "a",
+      groups: [],
+    });
+    invokeMock.mockImplementation(async (command: unknown) =>
+      command === "sessions_load" ? snapshot : null
+    );
+    await hydrateSessions();
+    expect(useSessionStore.getState().sessions.find(
+      s => s.id === "crashed-session-1"
+    )?.recoveryOnly).toBe(true);
+  });
+});

@@ -169,6 +169,22 @@ function submittedRecipe(): SubmittedRecipe {
   return mocks.submitDaemonDesktopTurn.mock.calls[0][1] as SubmittedRecipe;
 }
 
+describe("lost first-save session safety", () => {
+  it("refuses a new model turn from a read-only recovered shell", async () => {
+    seedSession("recovered-1");
+    useSessionStore.setState((state) => ({
+      sessions: state.sessions.map(s =>
+        s.id === "recovered-1" ? { ...s, recoveryOnly: true } : s
+      ),
+    }));
+    await expect(runAgentTurn("recovered-1", "continue writing files"))
+      .rejects.toThrow(/without its original transcript/i);
+    expect(mocks.submitDaemonDesktopTurn).not.toHaveBeenCalled();
+    expect(mocks.watchDaemonDesktopTurn).not.toHaveBeenCalled();
+    expect(streamed).toEqual([]);
+  });
+});
+
 describe("every desktop send is a durable ingress turn", () => {
   it("hands a workspace-mutating send to the resident runner with its contract frozen", async () => {
     await runAgentTurn("s-1", "fix the failing test in src/lib/a.ts");
