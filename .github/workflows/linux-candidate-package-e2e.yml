@@ -174,6 +174,13 @@ jobs:
           test "$actual" = "$expected"
           printf '%s\n' "$package_name" > evidence/package-name.txt
           echo "$actual" > evidence/previous-installed-version.txt
+          # Execute the actual system-installed binary at every package stage.
+          cli="/usr/lib/little-monkey/monkey"
+          test -x "$cli"
+          "$cli" --version | tee evidence/previous-cli-version.txt
+          core="$(printf '%s' "$expected" | sed -E 's/^([0-9]+\\.[0-9]+\\.[0-9]+).*$/\\1/')"
+          test -n "$core"
+          grep -Fq "$core" evidence/previous-cli-version.txt
           mkdir -p "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app"
           # Synthetic canary: package-manager data retention ONLY. This is
           # not proof that live user session databases migrated successfully.
@@ -192,6 +199,13 @@ jobs:
           actual="$(dpkg-query -W -f='${Version}' "$package_name")"
           test "$actual" = "$expected"
           echo "$actual" > evidence/candidate-installed-version.txt
+          # Execute the actual system-installed binary at every package stage.
+          cli="/usr/lib/little-monkey/monkey"
+          test -x "$cli"
+          "$cli" --version | tee evidence/candidate-cli-version.txt
+          core="$(printf '%s' "$expected" | sed -E 's/^([0-9]+\\.[0-9]+\\.[0-9]+).*$/\\1/')"
+          test -n "$core"
+          grep -Fq "$core" evidence/candidate-cli-version.txt
           (cd "$RUNNER_TEMP/lm-user-data/com.littlemonkey.app" && sha256sum -c "$GITHUB_WORKSPACE/evidence/data-canary-before.txt") 2>&1 | tee evidence/upgrade-canary-check.txt
           # sha256sum -c uses the original absolute pathname recorded before
           # the upgrade; it checks unchanged bytes, not app DB migration.
@@ -210,6 +224,15 @@ jobs:
           actual="$(dpkg-query -W -f='${Version}' "$package_name")"
           test "$actual" = "$expected"
           echo "$actual" > evidence/rolled-back-package-version.txt
+          # Execute the actual system-installed binary at every package stage.
+          cli="/usr/lib/little-monkey/monkey"
+          test -x "$cli"
+          "$cli" --version | tee evidence/rollback-cli-version.txt
+          core="$(printf '%s' "$expected" | sed -E 's/^([0-9]+\\.[0-9]+\\.[0-9]+).*$/\\1/')"
+          test -n "$core"
+          grep -Fq "$core" evidence/rollback-cli-version.txt
+          dpkg --verify "$package_name" > evidence/dpkg-verify-after-rollback.txt
+          test ! -s evidence/dpkg-verify-after-rollback.txt
           sha256sum -c evidence/data-canary-before.txt | tee evidence/rollback-canary-check.txt
           echo "PASS: real apt install, cross-version upgrade and apt downgrade; GUI and in-app updater rollback remain UNVERIFIED" | tee evidence/install-result.txt
 
