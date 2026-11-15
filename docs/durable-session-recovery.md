@@ -105,3 +105,20 @@ failures. A paired mobile client can observe its own authenticated conversation;
 shared desktop-session attachment through paired-device remote APIs is not yet
 implemented. Multi-window write-conflict-free shared transcripts also remain a
 separate limitation of `sessions.rs`'s primary-window writer model.
+
+## Paired-device read-only attachment
+
+An already-paired device with **ViewSessions**, **ViewRuns**, and **ViewEvents**
+may discover a desktop or voice turn by issuing a signed GET to
+`/v1/remote/mobile/sessions/{session_id}/agent-turns`. The response returns
+stable `turn_id`, `run_id`, run state, and the existing read-only
+`/v1/remote/runs/{run_id}/events?after=0` cursor endpoint. The host evaluates
+each run against the device's **existing run/workspace scope**. Out-of-scope runs
+are omitted, not identified; prompts, tool arguments, and frozen recipes are
+not exposed. No client may grant itself ViewSessions or widen run scope.
+Approval, cancel, pause and execution retain their separate existing grants.
+Devices without the new combination of permissions receive a refusal, even
+when they know a desktop session ID.
+
+This API does not add mobile-side transcript editing or new turn submission
+into arbitrary desktop sessions; it supplies authenticated observation only.

@@ -255,6 +255,12 @@ pub const REMOTE_ROUTES: &[RemoteRouteSpec] = &[
     RemoteRouteSpec {
         plane: RemotePlane::Mobile,
         method: "GET",
+        path: "/v1/remote/mobile/sessions/{session_id}/agent-turns",
+        gate: RemoteGate::Capability("ViewSessions"),
+    },
+    RemoteRouteSpec {
+        plane: RemotePlane::Mobile,
+        method: "GET",
         path: "/v1/remote/mobile/sessions/{session_id}/messages",
         gate: RemoteGate::Capability("ViewSessions"),
     },
