@@ -15,6 +15,7 @@ import {
 import {
   executeDeliveryMutation,
   prepareDeliveryMutation,
+  inspectOwnedWorktree,
   type ConfirmationPreview,
   type DeliveryMutation,
 } from "../../lib/gitDelivery";
@@ -64,25 +65,41 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [changedFiles, setChangedFiles] = useState<string[]>([]);
 
   const reset = () => {
     setPreview(null);
     setPendingMutation(null);
     setConfirmation("");
     setError(null);
+    setChangedFiles([]);
+  };
+
+  const previewNext = async (mutation: DeliveryMutation) => {
+    const next = await prepareDeliveryMutation(mutation);
+    setPreview(next);
+    setPendingMutation(mutation);
+    setConfirmation("");
   };
 
   const preparePush = async () => {
     if (!run) return;
     setError(null);
     try {
-      const mutation: DeliveryMutation = {
-        kind: "push",
-        payload: { worktreeId: run.worktreeId, remote: "origin" },
-      };
-      const result = await prepareDeliveryMutation(mutation);
-      setPreview(result);
-      setPendingMutation(mutation);
+      if (!run.checks.length || run.checks.some((check) => !check.passed || check.code !== 0)) {
+        throw new Error("Authoritative repository tests must pass before GitHub delivery.");
+      }
+      const inspection = await inspectOwnedWorktree(run.worktreeId);
+      if (inspection.worktree.marker.repositorySlug !== run.repositorySlug
+          || inspection.worktree.marker.branch !== run.branch) {
+        throw new Error("Owned branch identity no longer matches the issue.");
+      }
+      const files = [...new Set(inspection.files.filter((file) => !file.ignored).map((file) => file.path))];
+      setChangedFiles(files);
+      if (inspection.dirty && files.length === 0) throw new Error("Dirty owned worktree has no safe changed-file list.");
+      await previewNext(inspection.dirty
+        ? { kind: "commit", payload: { worktreeId: run.worktreeId, paths: files, message: ("Fix issue #" + run.issueNumber + ": " + run.issueTitle).slice(0, 120) } }
+        : { kind: "push", payload: { worktreeId: run.worktreeId, remote: "origin" } });
     } catch (err) {
       setError(errorText(err));
     }
@@ -93,36 +110,39 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
     setBusy(true);
     setError(null);
     try {
-      if (pendingMutation.kind === "push") {
-        await executeDeliveryMutation(pendingMutation, preview.digest, confirmation);
-        setConfirmation("");
-        const title = `Fixes #${run.issueNumber}: ${run.issueTitle}`.slice(0, 512);
-        const checksSummary = run.checks.length
-          ? run.checks.map((check) => `- ${check.passed ? "✅" : "❌"} ${check.label}: \`${check.command}\``).join("\n")
-          : "No test/build scripts were detected in this repository.";
+      const result = await executeDeliveryMutation(pendingMutation, preview.digest, confirmation) as {
+        number?: number; url?: string;
+      };
+      if (pendingMutation.kind === "commit") {
+        await previewNext({ kind: "push", payload: { worktreeId: run.worktreeId, remote: "origin" } });
+      } else if (pendingMutation.kind === "push") {
+        if (run.baseRef === "HEAD") throw new Error("Legacy run has no concrete target branch; reconcile before opening a PR.");
+        const title = ("Fixes #" + run.issueNumber + ": " + run.issueTitle).slice(0, 512);
+        const checksSummary = run.checks.map((check) =>
+          "- " + (check.passed ? "PASS" : "FAIL") + " " + check.label + ": " + check.command
+          + " (exit " + (check.code ?? "unknown") + ")").join("\n");
         const body = [
-          `Resolves #${run.issueNumber}.`,
+          "Resolves #" + run.issueNumber + ".",
           "",
-          "## Checks",
+          "## Changes",
+          changedFiles.length ? changedFiles.map((file) => "- " + file).join("\n") : "See the owned-branch PR diff.",
+          "",
+          "## Authoritative local verification",
           checksSummary,
           "",
-          "## Non-goals",
-          "This draft was opened by Little Monkey's Issue-to-PR flow. Merge, force-push, branch deletion, and review-thread resolution are handled by a human reviewer, never by this flow.",
+          "## Independent review and limitations",
+          "Review evidence is retained in the autonomous task run ledger. CI checks are observed separately against the exact PR head. Human approval is required before publication. No automatic merge or force-push.",
         ].join("\n");
-        const nextMutation: DeliveryMutation = {
-          kind: "create_draft_pr",
-          payload: { worktreeId: run.worktreeId, base: "main", title, body },
-        };
-        const next = await prepareDeliveryMutation(nextMutation);
-        setPreview(next);
-        setPendingMutation(nextMutation);
+        const mutation: DeliveryMutation = run.prNumber
+          ? { kind: "update_draft_pr", payload: { worktreeId: run.worktreeId, prNumber: run.prNumber, title, body } }
+          : { kind: "create_draft_pr", payload: { worktreeId: run.worktreeId, base: run.baseRef, title, body } };
+        await previewNext(mutation);
       } else {
-        const result = (await executeDeliveryMutation(pendingMutation, preview.digest, confirmation)) as {
-          number?: number;
-          url?: string;
-        };
+        const number = result.number ?? run.prNumber;
+        const url = result.url ?? run.prUrl;
         reset();
-        if (result.number && result.url) onOpened(result.number, result.url);
+        if (!number || !url) throw new Error("GitHub did not provide a verifiable draft PR identity.");
+        onOpened(number, url);
       }
     } catch (err) {
       setError(errorText(err));
