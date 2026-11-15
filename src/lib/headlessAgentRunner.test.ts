@@ -416,4 +416,28 @@ describe('runHeadlessAgent', () => {
     expect(result.evidence.executedTools).toEqual(['read_file', 'read_file']);
     expect(recorder.fail).toHaveBeenCalledWith(result.summary);
   });
+  it('charges provider token usage before any requested external tool executes', async () => {
+    mocks.attemptStream.mockResolvedValueOnce({
+      content: '', toolCalls: [toolCall('run_shell')], streamError: null,
+      contentStarted: true, usage: { promptTokens: 350, completionTokens: 70 },
+    });
+    const onUsage = vi.fn().mockRejectedValue(new Error('Frozen total model token budget exhausted'));
+    const result = await runHeadlessAgent(baseParams({ onUsage }));
+    expect(onUsage).toHaveBeenCalledWith('run-1-0', 350, 70);
+    expect(result.outcome).toBe('error');
+    expect(result.summary).toContain('budget exhausted');
+    expect(mocks.executeToolCall).not.toHaveBeenCalled();
+    expect(recorder.complete).not.toHaveBeenCalled();
+  });
+
+  it('cannot proceed when provider omits token usage under an enforced budget', async () => {
+    mocks.attemptStream.mockResolvedValueOnce({
+      content: '', toolCalls: [toolCall('run_shell')], streamError: null, contentStarted: true,
+    });
+    const result = await runHeadlessAgent(baseParams({ onUsage: vi.fn() }));
+    expect(result.outcome).toBe('error');
+    expect(result.summary).toContain('no token usage');
+    expect(mocks.executeToolCall).not.toHaveBeenCalled();
+  });
+
 });
