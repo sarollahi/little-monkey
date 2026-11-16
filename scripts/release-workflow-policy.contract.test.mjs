@@ -39,3 +39,13 @@ test("publication is downstream of installer smoke and guarded preflight", () =>
   assert.match(workflow, /Unexpected Linux release signer fingerprint/);
   assert.doesNotMatch(workflow, /skipping installer signatures/i);
 });
+
+test("fast release gate actually executes source-commit and signing-key tests", () => {
+  const fast = readFileSync(new URL("../.github/workflows/release-contract-fast.yml", import.meta.url), "utf8");
+  const execution = fast.split("      - name: Real Node tests of all offline acceptance and publication contracts")[1]
+    ?.split("      - name: Detect stale live owner links")[0];
+  assert.ok(execution?.includes("node --test"), "fast gate has no actual Node test command");
+  assert.match(execution, /scripts\/release-ci-source-gate\.test\.mjs/);
+  assert.match(execution, /scripts\/release-trust-pins\.test\.mjs/);
+  assert.match(execution, /scripts\/release-manifest-gate\.test\.mjs/);
+});
