@@ -621,6 +621,35 @@ pub fn issue_to_pr_advance(
             run.status
         ));
     }
+    if status == "monitoring_ci" && (pr_number.is_some() || pr_url.is_some() || run.pr_number.is_none()) {
+        // A UI callback may record a PR identity only after an actual GitHub
+        // write. It cannot supply a made-up number/URL or a fork PR and enter
+        // the authoritative CI observer without validating owned branch HEAD.
+        let number = pr_number.or(run.pr_number)
+            .ok_or_else(|| "Missing GitHub draft PR number".to_string())?;
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        if inspection.dirty
+            || inspection.worktree.marker.branch != run.branch
+            || inspection.worktree.marker.repository_slug != run.repository_slug
+        {
+            return Err("Cannot monitor CI for a dirty or non-owned worktree".to_string());
+        }
+        let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
+        let expected_url = format!("https://github.com/{}/pull/{number}", run.repository_slug);
+        if pr.get("isDraft").and_then(Value::as_bool) != Some(true)
+            || pr.get("state").and_then(Value::as_str) != Some("OPEN")
+            || pr.get("isCrossRepository").and_then(Value::as_bool) != Some(false)
+            || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
+            || pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str())
+            || pr.get("headRefOid").and_then(Value::as_str) != Some(inspection.head_oid.as_str())
+            || pr.get("url").and_then(Value::as_str) != Some(expected_url.as_str())
+            || pr_url.as_ref().is_some_and(|url| url != &expected_url)
+        {
+            return Err("The supplied draft PR does not match the owned branch, base, HEAD and GitHub URL".to_string());
+        }
+        run.pr_number = Some(number);
+        run.pr_url = Some(expected_url);
+    }
     if status == "done" {
         // The final human action must not consume a stale stored "ready".
         // Re-read real GitHub checks and owned head at the approval boundary.
