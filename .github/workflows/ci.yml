@@ -281,6 +281,11 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Stage required Tauri CLI sidecar bootstrap placeholder
+        # cargo build --bin monkey-cli still runs this Tauri crate's build.rs.
+        # It needs an externalBin path before the real CLI can be compiled.
+        run: node scripts/ensure-cli-sidecar-placeholder.mjs
+
       - name: Provision Linux reflink test volume
         if: startsWith(matrix.os, 'ubuntu')
         run: |
@@ -426,7 +431,10 @@ jobs:
             # test threads negotiate Secret Service sessions concurrently,
             # invalidating the session DBus connection for both tests.
             # Run every test (not a skip) serially against this real daemon.
-            # Channel-agent E2E tests spawn the real CLI binary. Build it first;\n            # `cargo test` alone produces a test harness, not the executable.\n            cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli\n            RUST_TEST_THREADS=1 pnpm test:rust
+            # Channel-agent E2E tests spawn the real CLI. Build it first;
+            # cargo test alone produces a test harness, not the CLI executable.
+            cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
+            RUST_TEST_THREADS=1 pnpm test:rust
             # Three ACTUAL independently running daemon installations over
             # signed/pinned TLS on loopback, private SQLite and OS keychain.
             # This test owns only disposable GitHub-hosted runner state.
