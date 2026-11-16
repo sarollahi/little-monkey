@@ -188,3 +188,14 @@ separately paired device. Compare the per-run event cursor, original run id,
 workspace diffs and mutation confirmation ledger before concluding that a
 production scenario survived. The command cannot certify those unexecuted
 host-level scenarios.
+
+## Intentional session deletion
+
+A deleted session must not reappear because its daemon ingress or run ledger
+remains available for audit. The desktop stores a bounded local tombstone of
+deleted session **identifiers only** and skips automatic shell reconstruction
+for dismissed IDs. Deleting a chat does not cancel the underlying resident
+worker, grant a new tool permission, or erase its immutable run ledger. The
+tombstone is local to the desktop's storage origin; without writable browser
+storage only the running process can retain the suppression. Recovery is not
+a substitute for an explicit backend data-retention/deletion policy.

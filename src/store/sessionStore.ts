@@ -25,6 +25,7 @@ import type { UsageInfo } from "./usageStore";
 import type { WorkflowSpec } from "../lib/workflow";
 import { errorMessage } from "../lib/errors";
 import { fireObservedHooks } from "../lib/userHooks";
+import { isDaemonSessionDismissed, rememberDaemonSessionDismissal } from "../lib/daemonSessionDismissals";
 
 /** localStorage key sessions were persisted under BEFORE file-based
  * persistence existed — only read (once, then removed) to migrate old data.
@@ -1959,6 +1960,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     // This id came from accepted ingress, not from provider output. Reject
     // malformed/massive ids before they enter the persisted session index.
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(sessionId)) return false;
+    if (isDaemonSessionDismissed(sessionId)) return false;
     if (get().sessions.some((session) => session.id === sessionId)) return true;
     const shell: ChatSession = {
       ...createSession(),
@@ -2026,8 +2028,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   deleteSession: (id) => {
     // A real user action ends this session. Observe it once, outside Zustand's
     // pure state updater, and never run shell hooks from model-authored text.
-    if(get().sessions.some(session=>session.id===id))
+    if(get().sessions.some(session=>session.id===id)) {
+      rememberDaemonSessionDismissal(id);
       fireObservedHooks('SessionEnd',{session_id:id});
+    }
     set((state) => {
       const deleted = state.sessions.find((s) => s.id === id);
       let remaining = state.sessions.filter((s) => s.id !== id);

@@ -467,3 +467,14 @@ describe("watcher-only session transcript updates", () => {
     )).toBe(true);
   });
 });
+
+describe("explicit deletion prevents daemon recovery from resurrecting a chat", () => {
+  it("does not recreate an intentionally deleted session even if daemon ingress remains", () => {
+    const id = "deleted-daemon-session-20261116";
+    seed(makeSession(id));
+    useSessionStore.getState().deleteSession(id);
+    expect(useSessionStore.getState().sessions.some(s => s.id === id)).toBe(false);
+    expect(useSessionStore.getState().recoverMissingDaemonSession(id)).toBe(false);
+    expect(useSessionStore.getState().sessions.some(s => s.id === id)).toBe(false);
+  });
+});
