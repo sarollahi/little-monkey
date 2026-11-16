@@ -100,20 +100,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # whisper-rs-sys CMake versions place their cache in different
-          # nested directories. A shell glob naming one specific layout
-          # previously failed all six platforms despite successful cargo check.
-          # Search actual build artifacts and still fail CLOSED if none exist.
-          mapfile -d '' caches < <(find src-tauri/target -type f -name CMakeCache.txt -path '*whisper-rs-sys-*' -print0)
-          if [ "${#caches[@]}" -eq 0 ]; then
-            echo "::error::Whisper built but no verifiable CMakeCache.txt was found"
-            find src-tauri/target -name CMakeCache.txt -o -name '*whisper-rs-sys*' | head -80
-            exit 1
-          fi
-          for cache in "${caches[@]}"; do
+          # Portable Bash 3.2 on macOS does not support mapfile.
+          # whisper-rs-sys now builds at build/whisper-rs-sys/<hash>/out/build;
+          # reject a missing cache rather than silently passing the baseline.
+          found=0
+          while IFS= read -r -d '' cache; do
+            found=1
             echo "Checking portable CPU flags in $cache"
             grep -E '^(GGML_NATIVE|GGML_CPU_ARM_ARCH|GGML_AVX512|HAVE_[A-Z0-9_]+):' "$cache" || true
-            if ! grep -q '^GGML_NATIVE:BOOL=OFF' "$cache"; then
+            if ! grep -qE '^GGML_NATIVE:(BOOL|UNINITIALIZED)=OFF$' "$cache"; then
               echo "::error::Whisper native CPU tuning is not explicitly disabled"
               exit 1
             fi
@@ -128,7 +123,12 @@ jobs:
                   exit 1
                 } ;;
             esac
-          done
+          done < <(find src-tauri/target -type f -name CMakeCache.txt -path '*/whisper-rs-sys/*/out/build/CMakeCache.txt' -print0)
+          if [ "$found" -ne 1 ]; then
+            echo "::error::Whisper built but no verifiable whisper-rs-sys CMakeCache.txt was found"
+            find src-tauri/target -name CMakeCache.txt -o -name '*whisper-rs-sys*' | head -80
+            exit 1
+          fi
 
   real-transcription:
     name: real WAV + browser WebM/Opus transcription
