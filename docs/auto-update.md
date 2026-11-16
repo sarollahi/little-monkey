@@ -71,7 +71,13 @@ a fault that was about to be fixed.
 
 Signing is set up: the keypair exists, `plugins.updater.pubkey` holds the
 public half, and the published 1.10.0 release includes `latest.json` and
-signed updater artifacts. Publishing now requires an explicitly approved **manual** Release workflow run
+signed updater artifacts. The production Release workflow now **refuses publication before building**
+when the updater private key or Linux GPG signing key/passphrase is unavailable;
+the Linux signing step also fails instead of silently skipping signatures.
+The separate unpublished candidate-package test disables updater signing
+*only* for its isolated test bundle and can never publish to a release.
+
+Publishing now requires an explicitly approved **manual** Release workflow run
 on the `main` branch with a reviewed acceptance-evidence URL. After approval,
 the `publish` job flips the draft only once all required build/smoke jobs pass.
 
