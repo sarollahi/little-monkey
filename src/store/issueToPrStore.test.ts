@@ -26,6 +26,11 @@ vi.mock("../lib/issueToPr", async (importOriginal) => ({
 }));
 
 vi.mock("../lib/issueToPrRunner", () => runner);
+const delivery = vi.hoisted(() => ({ inspectOwnedWorktree: vi.fn() }));
+vi.mock("../lib/gitDelivery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/gitDelivery")>()),
+  ...delivery,
+}));
 
 import type { IssueToPrRun } from "../lib/issueToPr";
 import { __resetIssueToPrControllersForTests, useIssueToPrStore } from "./issueToPrStore";
@@ -90,6 +95,11 @@ beforeEach(() => {
   for (const mock of Object.values(api)) mock.mockReset();
   runner.runIssueToPrAgent.mockReset();
   runner.runIssueToPrAutonomousTask = undefined;
+  delivery.inspectOwnedWorktree.mockReset();
+  delivery.inspectOwnedWorktree.mockResolvedValue({
+    worktree: { marker: { branch: "issue-to-pr/issue-7-abcdefgh", repositorySlug: "owner/repo" } },
+    files: [],
+  });
   __resetIssueToPrControllersForTests();
   api.listenIssueToPrProgress.mockImplementation(async (onProgress: (run: IssueToPrRun) => void) => {
     capturedOnProgress = onProgress;
@@ -268,22 +278,63 @@ describe("issueToPrStore", () => {
     expect(api.advanceIssueToPr).toHaveBeenCalledWith(run.runId, "implementing", { durableRunId: "run-abc" });
   });
 
-  it("init re-drives a run left in implementing from a previous process (no controller tracked for it yet)", async () => {
+  it("init restarts code only when the owned worktree has no partial edits", async () => {
     const run = fixtureRun({ status: "implementing" });
     api.listIssueToPrRuns.mockResolvedValue([run]);
+    api.getIssueToPrStatus.mockResolvedValue(run);
+    api.advanceIssueToPr.mockResolvedValue({ ...run, status: "implementing" });
     runner.runIssueToPrAgent.mockResolvedValue({
-      outcome: "completed",
-      summary: "Implemented the fix.",
-      durableRunId: null,
+      outcome: "completed", summary: "Implemented the fix.", durableRunId: null,
     });
     api.runIssueToPrChecks.mockResolvedValue({ ...run, status: "opening_pr" });
 
     await useIssueToPrStore.getState().init();
-    await flush();
+    await flush(30);
 
-    expect(api.advanceIssueToPr).toHaveBeenCalledWith(run.runId, "implementing");
+    expect(delivery.inspectOwnedWorktree).toHaveBeenCalledWith(run.worktreeId);
     expect(runner.runIssueToPrAgent).toHaveBeenCalledWith(expect.objectContaining({ runId: run.runId }));
-    expect(api.runIssueToPrChecks).toHaveBeenCalledWith(run.runId);
+  });
+
+  it("init re-verifies an interrupted coding diff without replaying any edits", async () => {
+    const run = fixtureRun({ status: "implementing" });
+    api.listIssueToPrRuns.mockResolvedValue([run]);
+    delivery.inspectOwnedWorktree.mockResolvedValue({
+      worktree: { marker: { branch: run.branch, repositorySlug: run.repositorySlug } },
+      files: [{ path: "src/fix.ts", ignored: false }],
+    });
+    api.getIssueToPrStatus.mockResolvedValueOnce(run)
+      .mockResolvedValue(fixtureRun({ status: "checking" }));
+    api.advanceIssueToPr.mockResolvedValue(fixtureRun({ status: "checking" }));
+    runner.runIssueToPrAutonomousTask = vi.fn().mockResolvedValue({
+      outcome: "completed", summary: "Reviewed persisted diff", durableRunId: run.runId,
+    });
+
+    await useIssueToPrStore.getState().init();
+    await flush(30);
+
+    expect(api.advanceIssueToPr).toHaveBeenCalledWith(run.runId, "checking");
+    expect(runner.runIssueToPrAutonomousTask).toHaveBeenCalledWith(expect.objectContaining({
+      runId: run.runId, resumeReviewOnly: true,
+    }));
+    expect(runner.runIssueToPrAgent).not.toHaveBeenCalled();
+  });
+
+  it("refuses to replay coding when the owned worktree identity changed", async () => {
+    const run = fixtureRun({ status: "implementing" });
+    api.listIssueToPrRuns.mockResolvedValue([run]);
+    api.getIssueToPrStatus.mockResolvedValue(run);
+    delivery.inspectOwnedWorktree.mockResolvedValue({
+      worktree: { marker: { branch: "unrelated-branch", repositorySlug: run.repositorySlug } },
+      files: [{ path: "src/fix.ts", ignored: false }],
+    });
+
+    await useIssueToPrStore.getState().init();
+    await flush(30);
+
+    expect(api.advanceIssueToPr).toHaveBeenCalledWith(run.runId, "failed", expect.objectContaining({
+      error: expect.stringContaining("Owned worktree identity changed"),
+    }));
+    expect(runner.runIssueToPrAgent).not.toHaveBeenCalled();
   });
 
   it("init recovers a checked run through read-only review without replaying agent mutations", async () => {
