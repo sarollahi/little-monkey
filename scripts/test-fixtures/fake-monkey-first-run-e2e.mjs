@@ -25,7 +25,7 @@ if (args[0] === "--version") {
   if (process.env.FAKE_UNRELATED === "1") writeFileSync(join(ws, "unrelated.txt"), "unrelated\n");
   console.log(JSON.stringify({run_id: "task-contract-stub", status: "queued"}));
 } else if (args[0] === "task" && args[1] === "attach") {
-  console.log(JSON.stringify({run_id: args[2], sequence: 1, event: "started"}));
+  console.log(JSON.stringify({run_id: args[2], sequence: 1, occurred_at_ms: 1000, event: {type:"started", payload:{engine_id:"fake-contract-only"}}}));
 } else if (args[0] === "task" && args[1] === "status") {
   console.log(JSON.stringify([{run_id: "task-contract-stub", status: process.env.FAKE_RUN_STATUS || "succeeded"}]));
 } else if (args[0] === "task" && args[1] === "cancel") {
