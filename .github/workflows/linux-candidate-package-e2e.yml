@@ -175,7 +175,7 @@ jobs:
           printf '%s\n' "$package_name" > evidence/package-name.txt
           echo "$actual" > evidence/previous-installed-version.txt
           # Execute the actual system-installed binary at every package stage.
-          cli="/usr/lib/little-monkey/monkey"
+          cli="/usr/bin/monkey-cli"
           test -x "$cli"
           "$cli" --version | tee evidence/previous-cli-version.txt
           core="$(printf '%s' "$expected" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*$/\1/')"
@@ -200,7 +200,7 @@ jobs:
           test "$actual" = "$expected"
           echo "$actual" > evidence/candidate-installed-version.txt
           # Execute the actual system-installed binary at every package stage.
-          cli="/usr/lib/little-monkey/monkey"
+          cli="/usr/bin/monkey-cli"
           test -x "$cli"
           "$cli" --version | tee evidence/candidate-cli-version.txt
           core="$(printf '%s' "$expected" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*$/\1/')"
@@ -225,7 +225,7 @@ jobs:
           test "$actual" = "$expected"
           echo "$actual" > evidence/rolled-back-package-version.txt
           # Execute the actual system-installed binary at every package stage.
-          cli="/usr/lib/little-monkey/monkey"
+          cli="/usr/bin/monkey-cli"
           test -x "$cli"
           "$cli" --version | tee evidence/rollback-cli-version.txt
           core="$(printf '%s' "$expected" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*$/\1/')"
