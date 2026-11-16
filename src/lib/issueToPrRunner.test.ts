@@ -54,6 +54,7 @@ describe('runIssueToPrAgent', () => {
       signal,
       maxIterations: MAX_ISSUE_TO_PR_ITERATIONS,
       requiredWorkspaceRoot: 'issue-42-worktree',
+      allowedTools: ['read_file', 'list_dir', 'glob', 'grep', 'write_file', 'edit_file'],
       maxWallTimeMs: 30 * 60_000,
       executionSource: 'issue-to-pr',
       durableRun: {
