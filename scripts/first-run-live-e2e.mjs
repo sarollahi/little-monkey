@@ -124,7 +124,7 @@ try {
   capture("git-commit", "git", ["-c", "user.name=Little Monkey Acceptance",
     "-c", "user.email=first-run@example.invalid", "-c", "commit.gpgsign=false",
     "commit", "-qm", "deliberately failing first-run baseline"]);
-  capture("baseline", process.execPath, [join(sourceRoot, "scripts/first-run-acceptance.mjs"),
+  capture("baseline-cli", process.execPath, [join(sourceRoot, "scripts/first-run-acceptance.mjs"),
     "baseline", "--workspace", workspace, "--output", join(evidenceDir, "baseline.json")]);
   const baseline = JSON.parse(readFileSync(join(evidenceDir, "baseline.json"), "utf8"));
   summary.proof.baseline = baseline.outcome;
