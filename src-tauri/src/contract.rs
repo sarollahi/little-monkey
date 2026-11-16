@@ -256,7 +256,9 @@ pub const REMOTE_ROUTES: &[RemoteRouteSpec] = &[
         plane: RemotePlane::Mobile,
         method: "GET",
         path: "/v1/remote/mobile/sessions/{session_id}/agent-turns",
-        gate: RemoteGate::Capability("ViewSessions"),
+        // First grant checked by the route is ViewRuns; the handler additionally
+        // requires ViewSessions and ViewEvents, then validates the run scope.
+        gate: RemoteGate::Action("ViewRuns"),
     },
     RemoteRouteSpec {
         plane: RemotePlane::Mobile,

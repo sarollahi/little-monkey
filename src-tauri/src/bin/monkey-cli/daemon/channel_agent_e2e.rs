@@ -110,8 +110,13 @@ pub(super) fn cli_beside_test_binary(_current: &Path) -> Option<PathBuf> {
 /// One exec per candidate, once per test run.
 fn locate_cli_binary() -> PathBuf {
     let current = std::env::current_exe().expect("test binary path");
-    let deps = current.parent().expect("deps directory").to_path_buf();
-    let profile = deps.parent().expect("profile directory").to_path_buf();
+    // Cargo may relocate test binaries into build/<crate>/<hash>/out
+    // (including when custom artifact dirs or compiled-test isolation is in
+    // effect). The executable's immediate parent is then NOT target/<profile>/deps.
+    // Walk up to the actual Cargo profile via either 'build' or 'deps',
+    // preserving support for custom target directories and profile names.
+    let profile = cargo_profile_root(&current);
+    let deps = profile.join("deps");
     let name = if cfg!(windows) {
         "monkey-cli.exe"
     } else {
@@ -148,6 +153,28 @@ fn locate_cli_binary() -> PathBuf {
          build it with `cargo build --bin monkey-cli`",
         deps.display()
     );
+}
+
+fn cargo_profile_root(current: &Path) -> PathBuf {
+    current
+        .ancestors()
+        .find(|ancestor| {
+            ancestor.file_name().is_some_and(|name| name == "build" || name == "deps")
+        })
+        .and_then(Path::parent)
+        .or_else(|| current.parent())
+        .expect("Cargo test binary must have a parent directory")
+        .to_path_buf()
+}
+
+#[test]
+fn cli_artifact_locator_finds_cargo_profile_from_relocated_test_binary() {
+    let profile = PathBuf::from("sandbox").join("target").join("ci-profile");
+    let ordinary = profile.join("deps").join("monkey_cli-test-hash");
+    let relocated = profile.join("build").join("little-monkey")
+        .join("build-hash").join("out").join("monkey_cli-test-hash");
+    assert_eq!(cargo_profile_root(&ordinary), profile);
+    assert_eq!(cargo_profile_root(&relocated), profile);
 }
 
 /// True when `candidate` is the CLI rather than a test harness: libtest

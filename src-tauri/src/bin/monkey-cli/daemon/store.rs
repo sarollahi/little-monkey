@@ -2794,8 +2794,15 @@ mod tests {
                     0
                 ))
                 .unwrap(),
-            DAEMON_V20
+            DAEMON_LATEST
         );
+        // V21's session-attachment index is present after the older schema
+        // migrates; current-version assertions must not lag new migrations.
+        let index_exists: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='ingress_turns_session_attachment_idx'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(index_exists, 1);
         // V20's ledger exists and is empty. Empty is the correct starting
         // state and not a vacuous assertion: the alternative a migration could
         // have taken — back-filling it from the outbound event log — would

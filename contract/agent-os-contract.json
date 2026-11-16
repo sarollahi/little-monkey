@@ -424,7 +424,7 @@
       "plane": "mobile",
       "method": "GET",
       "path": "/v1/remote/mobile/sessions/{session_id}/agent-turns",
-      "gate": "capability:ViewSessions"
+      "gate": "action:ViewRuns"
     },
     {
       "plane": "mobile",
