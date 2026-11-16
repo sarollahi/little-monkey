@@ -37,6 +37,20 @@ queued, failed, or cancelled, preflight fails closed. Required security,
 installer, hardware, signing, and human acceptance checks are additional
 gates and are not waived by this check.
 
+## macOS trust verification
+
+The production release now fails early if Apple Developer ID certificate,
+identity, account, team or notarization credentials are missing. After the
+actual macOS Tauri build, both Intel and Apple Silicon jobs inspect the
+bundled `.app`, verify its code signature, assert a Developer ID Application
+authority and the configured team ID, and require a successful macOS
+Gatekeeper `spctl --assess`. This is a real CI trust check for the built
+artifact, not a substitute for installation on a clean user's Mac.
+
+Windows Authenticode signing, SmartScreen reputation and actual installer
+trust on clean Windows machines remain manual acceptance requirements.
+Do not imply that Tauri's updater signature is a Windows OS code signature.
+
 ## Final draft publication gate
 
 Before `release.yml` makes a draft public, it now fetches that exact draft's

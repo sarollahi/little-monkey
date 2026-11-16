@@ -98,6 +98,26 @@ jobs:
           done
           echo "Required signing credentials are configured (their validity is checked during signing)."
 
+      - name: Enforce macOS Developer ID signing and notarization credentials
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for key in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD \
+                     APPLE_SIGNING_IDENTITY APPLE_ID \
+                     APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing $key: refuse production release without notarized macOS signing"
+              exit 1
+            fi
+          done
+
       - name: Block publication on current Rust security advisories
         shell: bash
         run: |
@@ -284,6 +304,26 @@ jobs:
           # Attaches the signed `latest.json` the updater endpoint points at.
           # No-op when the signing secrets are missing (nothing to describe).
           includeUpdaterJson: true
+
+      - name: Verify actual macOS app Developer ID signature and Gatekeeper assessment
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          APP="$(find "$BUNDLE" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP" ]; then
+            echo "::error::No macOS app bundle to inspect"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          details="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+          grep -Fq "Authority=Developer ID Application:" <<< "$details"
+          grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" <<< "$details"
+          spctl --assess --type execute --verbose=4 "$APP"
+          echo "Verified macOS Developer ID signature and Gatekeeper approval for ${{ matrix.target }}" >> "$GITHUB_STEP_SUMMARY"
 
       # The updater signature above only covers the .AppImage the in-app
       # updater downloads. Someone who grabs a .deb or .rpm from the releases

@@ -46,6 +46,21 @@ The **three remaining preview findings** are:
 
 Neither remaining finding is ignored or suppressed. **Release: BLOCKED.**
 
+The [rmcp 3.10.0 migration probe](../.github/workflows/security-mcp3-probe.yml)
+now runs a **disposable** dependency-resolution attempt followed by real
+Rust library/CLI/test-server compilation and, only if compilation succeeds,
+MCP HTTP and stdio integration tests. Compiler errors and the exact unmerged
+manifest/lockfile patch are retained as CI artifacts. Its workflow conclusion
+does not certify migration success; only an actual zero compiler exit code,
+successful integration tests and a fresh audit could do that.
+
+The SQLite fix needs `libsqlite3-sys >=0.39` (bundled SQLite >=3.54) but
+the latest released Matrix Rust SDK 0.19.1 pins the shared `rusqlite` line;
+forcibly adding a second `links=sqlite3` crate is not an acceptable fix.
+The existing private data-directory and backup file validation policies
+do not justify ignoring that upstream vulnerability. Avoid opening imported
+or untrusted database/WAL pairs until a compatible SDK fix is available.
+
 ## Remediation sequence
 
 1. For every crate, run `cargo tree --manifest-path src-tauri/Cargo.toml -i CRATE`

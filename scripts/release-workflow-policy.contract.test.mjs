@@ -30,6 +30,10 @@ test("publication is downstream of installer smoke and guarded preflight", () =>
   assert.match(workflow, /cargo audit --file src-tauri\/Cargo.lock/);
   assert.match(workflow, /pnpm audit --prod --audit-level high/);
   assert.match(workflow, /Enforce production updater and Linux installer signing credentials/);
+  assert.match(workflow, /Enforce macOS Developer ID signing and notarization credentials/);
+  assert.match(workflow, /Verify actual macOS app Developer ID signature and Gatekeeper assessment/);
+  assert.match(workflow, /codesign --verify --deep --strict/);
+  assert.match(workflow, /spctl --assess --type execute/);
   assert.match(workflow, /Missing Linux installer signing credentials/);
   assert.doesNotMatch(workflow, /skipping installer signatures/i);
 });
