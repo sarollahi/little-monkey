@@ -217,3 +217,14 @@ uploads its exact `test-results/durable-session-acceptance.json` evidence
 as a GitHub Actions artifact. The uploader tolerates an absent report after
 an earlier gate failure, but those earlier gates still fail the job; no
 missing evidence can turn a red build green.
+
+## Concurrent snapshot staging
+
+The file-storage backend now uses unique same-directory temporary paths
+rather than a shared `.json.tmp`, and serializes file publication together
+with profile-index synchronization across the desktop windows in **one app
+process**. The Rust concurrency test races two large snapshots and verifies
+that the published result is an intact one, never a mixture. This guarantees
+atomic publication at the file boundary, **not** logical merging of edits
+made in two different windows or two app processes. Independent edits to one
+session still require a future revision-aware merge/conflict protocol.

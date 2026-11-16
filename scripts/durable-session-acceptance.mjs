@@ -51,6 +51,7 @@ const rustCases = [
   "recovery_read_model_includes_only_live_desktop_and_reconciliation",
   "recovery_ignores_terminal_jobs_but_preserves_reconciliation",
   "long_running_job_finished_recently_is_recovered_even_if_admission_is_old",
+  "cli_artifact_locator_finds_cargo_profile_from_relocated_test_binary",
   "session_scoped_attachment_filters_before_limiting",
   "paired_session_attachment_respects_both_capability_and_run_scope",
   "recovery_never_replays_a_confirmed_mutation",
@@ -103,6 +104,14 @@ if (!onlyFrontend) {
       requireTests: true,
     });
   }
+  suites.push({
+    name: "Rust session snapshot concurrency and atomicity",
+    command: "cargo",
+    argv: ["test", "--manifest-path", "src-tauri/Cargo.toml",
+      "--lib", "overlapping_writers_publish_only_complete_snapshots",
+      "--", "--nocapture"],
+    requireTests: true,
+  });
   suites.push({
     name: "published signed remote API contract",
     command: "cargo",
