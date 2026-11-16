@@ -95,7 +95,8 @@
     "test:first-run:contract": "node --check scripts/first-run-acceptance.mjs && node --check scripts/first-run-live-e2e.mjs && node --test scripts/lib/firstRunEventMetrics.test.mjs scripts/autonomous-task-live-eval.contract.test.mjs scripts/first-run-acceptance.contract.test.mjs scripts/first-run-live-e2e.contract.test.mjs",
     "test:first-run:live": "node scripts/first-run-live-e2e.mjs",
     "test:release-integrity:contract": "node --check scripts/release-asset-integrity.mjs && node --test scripts/release-asset-integrity.test.mjs",
-    "test:release-policy:contract": "node --test scripts/release-workflow-policy.contract.test.mjs && node scripts/check-canonical-links.mjs"
+    "test:release-policy:contract": "node --test scripts/release-workflow-policy.contract.test.mjs && node scripts/check-canonical-links.mjs && pnpm test:release-manifest:contract",
+    "test:release-manifest:contract": "node --test scripts/release-manifest-gate.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

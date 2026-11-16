@@ -56,7 +56,8 @@ jobs:
             scripts/lib/installSmoke.test.mjs \
             scripts/lib/firstRunEventMetrics.test.mjs \
             scripts/release-asset-integrity.test.mjs \
-            scripts/release-workflow-policy.contract.test.mjs
+            scripts/release-workflow-policy.contract.test.mjs \
+            scripts/release-manifest-gate.test.mjs
 
       - name: Detect stale live owner links without changing historical fixture
         shell: bash

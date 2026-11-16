@@ -26,6 +26,18 @@ only with disposable test workspaces and identities.
 6. Preserve the full, unedited console output, Git patch and evidence JSON.
    If the run failed, cancelled, or required a retry, label it accurately.
 
+## Final draft publication gate
+
+Before `release.yml` makes a draft public, it now fetches that exact draft's
+GitHub asset metadata and runs `scripts/release-manifest-gate.mjs`. This checks
+all six installer families, macOS signed updater archives, Windows and Linux
+updater signatures, Linux detached signatures, `latest.json`, the GPG key,
+SBOM and IDE plugins, with nonempty assets and SHA-256 digest fields. The
+expected matrix is tested against the real v1.12.0 release's format. The
+gate does **not** itself validate signing-key identity, Apple notarization,
+OS code signatures, or the bytes of every artifact; those still require
+independent integrity checks and the human acceptance report.
+
 ## Available execution paths
 
 The real CI run for commit `440a1969` on November 15, 2026 found
