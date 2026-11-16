@@ -57,10 +57,8 @@ jobs:
             scripts/release-ci-source-gate.mjs
             scripts/release-ci-source-gate.test.mjs
             scripts/release-trust-pins.json
-            scripts/release-trust-pins.test.mjs \
             scripts/release-trust-pins.test.mjs
-            scripts/release-manifest-gate.test.mjs \
-            scripts/release-ci-source-gate.test.mjs
+            scripts/release-manifest-gate.test.mjs
             examples/first-run/normalize.mjs
             examples/first-run/normalize.test.mjs
           if-no-files-found: error
@@ -93,7 +91,9 @@ jobs:
             scripts/lib/firstRunEventMetrics.test.mjs \
             scripts/release-asset-integrity.test.mjs \
             scripts/release-workflow-policy.contract.test.mjs \
-            scripts/release-manifest-gate.test.mjs
+            scripts/release-manifest-gate.test.mjs \
+            scripts/release-ci-source-gate.test.mjs \
+            scripts/release-trust-pins.test.mjs
 
       - name: Detect stale live owner links without changing historical fixture
         shell: bash
