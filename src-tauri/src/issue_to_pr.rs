@@ -632,6 +632,9 @@ pub fn issue_to_pr_advance(
         if inspection.dirty || inspection.head_oid != head_oid
             || run.ci_head_oid.as_deref() != Some(head_oid)
             || pr.get("isDraft").and_then(Value::as_bool) != Some(true)
+            || pr.get("state").and_then(Value::as_str) != Some("OPEN")
+            || pr.get("isCrossRepository").and_then(Value::as_bool) != Some(false)
+            || pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str())
             || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
             || run.review_evidence.is_none()
         {
@@ -1107,11 +1110,19 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
     let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
     if pr.get("isDraft").and_then(Value::as_bool) != Some(true)
         || pr.get("state").and_then(Value::as_str) != Some("OPEN")
+        || pr.get("isCrossRepository").and_then(Value::as_bool) != Some(false)
         || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
         || (run.base_ref != "HEAD"
             && pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str()))
     {
-        return Err("PR identity, draft state, or base branch no longer matches the frozen run".to_string());
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("PR draft/ownership/base state changed; reconcile before readiness or final approval".to_string());
+        run.updated_at_ms = now_ms()?;
+        runs.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &runs)?;
+        emit_progress(&app, &run);
+        return Ok(run);
     }
     let head_oid = pr.get("headRefOid").and_then(Value::as_str)
         .ok_or_else(|| "GitHub did not return the draft PR head".to_string())?;
@@ -1127,7 +1138,14 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
     }
     let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
     if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid) {
-        return Err("GitHub CI snapshot is for a stale PR head".to_string());
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("GitHub CI snapshot is for a stale PR head".to_string());
+        run.updated_at_ms = now_ms()?;
+        runs.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &runs)?;
+        emit_progress(&app, &run);
+        return Ok(run);
     }
     let (mut verdict, mut checks) = classify_ci_rollup(&rollup)?;
     checks.sort_by(|a, b| (&a.name, &a.state, &a.conclusion, &a.url)
