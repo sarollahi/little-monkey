@@ -19,6 +19,7 @@ const fixture = (changes: Partial<IssueToPrRun> = {}): IssueToPrRun => ({
   prUrl: null,
   checks: [],
   verificationGeneration: 0,
+  verificationInProgress: false,
   reviewEvidence: null,
   ciHistory: [],
   ciHeadOid: null,
