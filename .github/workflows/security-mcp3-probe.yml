@@ -1,0 +1,142 @@
+name: MCP v3 security migration probe (no publish)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/security-mcp3-probe.yml"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/src/mcp.rs"
+      - "src-tauri/src/mcp_oauth.rs"
+      - "src-tauri/src/bin/mcp_test_server.rs"
+      - "src-tauri/tests/mcp_http.rs"
+      - "src-tauri/tests/mcp_stdio.rs"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp3-probe-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  compile-probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+          key: mcp3-probe-3.10
+      - name: Build prerequisites for real Tauri Rust compilation
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf build-essential cmake clang libclang-dev ninja-build
+
+      - name: Create isolated rmcp 3.10.0 manifest and resolve lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-mcp3-probe
+          cp src-tauri/Cargo.toml security-mcp3-probe/original-Cargo.toml
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src-tauri/Cargo.toml')
+          before = p.read_text()
+          old = 'rmcp = { version = "2.2.0"'
+          assert before.count(old) == 1, "unexpected rmcp pin: refuse blind replacement"
+          p.write_text(before.replace(old, 'rmcp = { version = "=3.10.0"'))
+          PY
+          set +e
+          cargo update --manifest-path src-tauri/Cargo.toml -p rmcp --precise 3.10.0 \
+            > security-mcp3-probe/resolve.log 2>&1
+          code=$?
+          set -e
+          echo "$code" > security-mcp3-probe/resolve.exit
+          git diff -- src-tauri/Cargo.toml src-tauri/Cargo.lock \
+            > security-mcp3-probe/proposed-v3-upgrade.patch
+          if [ "$code" -eq 0 ]; then
+            cargo tree --manifest-path src-tauri/Cargo.toml -i rmcp \
+              > security-mcp3-probe/dependency-owners.txt 2>&1 || true
+          else
+            echo "MCP v3 dependency graph FAILED to resolve; compiler probe skipped" \
+              > security-mcp3-probe/compile.result
+          fi
+
+      - name: Compile real lib, daemon CLI and MCP test server against v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(cat security-mcp3-probe/resolve.exit)" != "0" ]; then
+            exit 0
+          fi
+          node scripts/ensure-cli-sidecar-placeholder.mjs
+          set +e
+          cargo check --manifest-path src-tauri/Cargo.toml \
+            --lib --bin monkey-cli --bin mcp_test_server \
+            > security-mcp3-probe/compile.log 2>&1
+          code=$?
+          set -e
+          echo "$code" > security-mcp3-probe/compile.exit
+          if [ "$code" = "0" ]; then
+            echo "COMPILED_REAL_MCP_V3" > security-mcp3-probe/compile.result
+          else
+            echo "FAILED_MCP_V3_API_COMPILATION" > security-mcp3-probe/compile.result
+            grep -E '^error(\[|:)' security-mcp3-probe/compile.log \
+              > security-mcp3-probe/compiler-errors-summary.txt || true
+          fi
+
+      - name: Run real MCP integration tests only if compilation succeeded
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f security-mcp3-probe/compile.exit ] || \
+             [ "$(cat security-mcp3-probe/compile.exit)" != "0" ]; then
+            echo "NOT_RUN: API compile or dependency resolution failed" \
+              > security-mcp3-probe/integration.result
+            exit 0
+          fi
+          set +e
+          cargo test --manifest-path src-tauri/Cargo.toml \
+            --test mcp_http --test mcp_stdio \
+            > security-mcp3-probe/integration.log 2>&1
+          code=$?
+          set -e
+          echo "$code" > security-mcp3-probe/integration.exit
+          if [ "$code" = "0" ]; then
+            echo "REAL_MCP_INTEGRATION_PASS" > security-mcp3-probe/integration.result
+          else
+            echo "REAL_MCP_INTEGRATION_FAIL" > security-mcp3-probe/integration.result
+          fi
+
+      - name: Record explicit migration outcome and boundaries
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p security-mcp3-probe
+          echo "This workflow is exploratory. No modified manifests or lockfiles are committed or published." \
+            > security-mcp3-probe/not-production-ready.txt
+          echo "rmcp target: 3.10.0 (fixed line for SSRF and unbounded responses)" \
+            >> security-mcp3-probe/not-production-ready.txt
+          echo "source SHA: $GITHUB_SHA" >> security-mcp3-probe/not-production-ready.txt
+          echo "SQLite remains a distinct unresolved release blocker." \
+            >> security-mcp3-probe/not-production-ready.txt
+          cat security-mcp3-probe/*.result security-mcp3-probe/resolve.exit 2>/dev/null \
+            >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload real compiler errors and optional integration output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp3-compatibility-compiler-evidence
+          path: security-mcp3-probe/
+          if-no-files-found: error
+          retention-days: 14
