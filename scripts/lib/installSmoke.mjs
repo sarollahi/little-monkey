@@ -96,9 +96,9 @@ export function expectedPayload(platform) {
     case "linux":
       return ["usr/bin/little-monkey", "usr/bin/monkey-cli"];
     case "darwin":
-      return ["Contents/MacOS/little-monkey", "Contents/Resources/monkey"];
+      return ["Contents/MacOS/little-monkey", "Contents/MacOS/monkey-cli"];
     case "win32":
-      return ["little-monkey.exe", "monkey.exe"];
+      return ["little-monkey.exe", "monkey-cli.exe"];
     default:
       return [];
   }
