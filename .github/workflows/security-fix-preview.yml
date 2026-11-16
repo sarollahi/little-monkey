@@ -55,8 +55,12 @@ jobs:
           from pathlib import Path
           p = Path('src-tauri/Cargo.toml')
           text = p.read_text()
-          assert text.count('version = "=48.0.7"') == 2, 'unexpected wasmtime version pins'
-          p.write_text(text.replace('version = "=48.0.7"', 'version = "=48.0.8"'))
+          if text.count('version = "=48.0.7"') == 2:
+              p.write_text(text.replace('version = "=48.0.7"', 'version = "=48.0.8"'))
+          elif text.count('version = "=48.0.8"') == 2:
+              print('Wasmtime/WASI already updated to compatible patched version')
+          else:
+              raise SystemExit('Unexpected Wasmtime/WASI pins: refuse speculative update')
           PY
           attempt "wasmtime 48.0.8" cargo update --manifest-path src-tauri/Cargo.toml -p wasmtime --precise 48.0.8
           attempt "wasmtime-wasi 48.0.8" cargo update --manifest-path src-tauri/Cargo.toml -p wasmtime-wasi --precise 48.0.8
