@@ -78,7 +78,9 @@ that would otherwise run in the primary workspace. The model's code
 investigation, mutations and reviewer calls are all charged against the same
 persisted issue budget. The GitHub issue coder is deliberately NOT offered
 `run_shell`, background shell tools, or direct GitHub tools; it may inspect
-and edit files only inside the app-owned root. Its repository checks execute
+and edit files only inside the app-owned root. It also rejects writes
+to Git metadata and GitHub Actions workflows/composite actions, including
+paths containing parent-directory traversal. Its repository checks execute
 through the existing bounded native verifier, and commit/push/PR creation use
 the separately approved Git delivery layer. Repository test scripts are still
 executable project code and must be trusted or run on an isolated host;
