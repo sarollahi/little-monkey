@@ -1,0 +1,6 @@
+{
+  "linux_gpg_fingerprint": "4E192C99F6C92873A3983537A89809F662D94B12",
+  "established_from": "Published GitHub release 1.12.0, little-monkey-release-key.asc and independently verified detached Debian signature",
+  "trust_scope": "Release-to-release signing key continuity only; publisher identity not independently established",
+  "rotation_policy": "Review, independently verify and explicitly update this pin before intentionally changing the production Linux release signing key"
+}
