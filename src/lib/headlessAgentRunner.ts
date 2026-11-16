@@ -143,16 +143,20 @@ function workspaceRootViolation(
   if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`)) {
     return `Tool "${toolCall.function.name}" may only target attached root "${requiredRoot}".`;
   }
-  if (executionSource === 'issue-to-pr') {
-    const relative = normalizedPath.slice(normalizedRoot.length).replace(/^\//, '');
-    const components = relative.split('/').filter((part) => part !== '' && part !== '.');
-    if (components.includes('..')) return 'Issue tool paths may not traverse parent directories.';
-    if (toolCall.function.name === 'write_file' || toolCall.function.name === 'edit_file') {
-      const lower = components.map((part) => part.toLowerCase());
-      if (lower.includes('.git')
-          || (lower[0] === '.github' && (lower[1] === 'workflows' || lower[1] === 'actions'))) {
-        return 'Issue agents cannot modify Git metadata or GitHub Actions definitions without a separate human-controlled workflow.';
-      }
+  // Both the coding agent and the independent reviewer are root-fenced.
+  // Deny traversals before any tool reaches Rust, including read-only calls.
+  const relative = normalizedPath.slice(normalizedRoot.length).replace(/^\//, '');
+  const components = relative.split('/').filter((part) => part !== '' && part !== '.');
+  if (components.includes('..')) return 'Owned-worktree tools may not traverse parent directories.';
+  if (executionSource === 'issue-to-pr' || executionSource === 'issue-to-pr-review') {
+    const lower = components.map((part) => part.toLowerCase());
+    if (lower.includes('.git')) return 'Issue agents and reviewers cannot access Git internals.';
+    if (executionSource === 'issue-to-pr'
+        && (toolCall.function.name === 'write_file' || toolCall.function.name === 'edit_file')
+        && (lower[0] === '.gitmodules'
+            || lower[0] === '.gitattributes'
+            || (lower[0] === '.github' && (lower[1] === 'workflows' || lower[1] === 'actions')))) {
+      return 'Issue agents cannot modify Git or GitHub execution policy without a human-controlled workflow.';
     }
   }
   return null;
