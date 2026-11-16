@@ -43,6 +43,8 @@ function emptyMcpRegistry(): McpToolRegistry {
  * than the model's own tool-call list. */
 export interface HeadlessAgentEvidence {
   executedTools: string[];
+  /** Paths from successful, actually-dispatched read_file tool results. */
+  successfulFileReads?: string[];
   toolFailures: string[];
   permissionRequests: string[];
   promptTokens: number;
@@ -294,6 +296,16 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
           // "which tools ran" never counts one the offered-tool check refused.
           evidence.executedTools.push(toolCall.function.name);
           const outcome = toolResultOutcome(resultContent, false);
+          if (toolCall.function.name === 'read_file' && outcome === 'succeeded') {
+            try {
+              const args = JSON.parse(toolCall.function.arguments || '{}') as { path?: unknown };
+              if (typeof args.path === 'string') {
+                // Keep only paths, never file contents or tokens in telemetry.
+                const path = args.path.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+                if (path) (evidence.successfulFileReads ??= []).push(path);
+              }
+            } catch { /* An unparseable read is never accepted as coverage. */ }
+          }
           if (outcome === 'denied') evidence.permissionRequests.push(toolCall.function.name);
           if (outcome === 'failed' || outcome === 'denied') {
             evidence.toolFailures.push(`${toolCall.function.name}: ${resultContent.slice(0, 240)}`);
