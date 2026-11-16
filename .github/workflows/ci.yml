@@ -163,6 +163,26 @@ jobs:
         # there as not being one.
         run: pnpm a11y
 
+      - name: First-run acceptance fixture and honest evidence contracts
+        # Runs the deliberately failing baseline as an EXPECTED baseline, plus
+        # real temporary Git checkouts for repaired/out-of-scope scenarios.
+        # No model is invoked here: this cannot certify agent success.
+        run: |
+          node --check scripts/first-run-acceptance.mjs
+          node --test scripts/autonomous-task-live-eval.contract.test.mjs
+          node --test scripts/first-run-acceptance.contract.test.mjs
+          node --check scripts/first-run-live-e2e.mjs
+          node --test scripts/first-run-live-e2e.contract.test.mjs
+          node scripts/first-run-acceptance.mjs baseline --output "$RUNNER_TEMP/little-monkey-first-run-baseline.json"
+
+      - name: Upload real first-run baseline evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-run-baseline
+          path: ${{ runner.temp }}/little-monkey-first-run-baseline.json
+          if-no-files-found: error
+
       - name: Controller response policy, in a real browser engine
         # The one gate jsdom cannot be: it enforces neither the permissions
         # policy nor the CSP, so the headers that once forbade the paired
@@ -183,7 +203,7 @@ jobs:
         # The step that hangs when a headless Chrome fails to come up, and the
         # one the job's own limit exists for. Capped tighter than the job so
         # the log says which step wedged instead of only that the job ran out.
-        timeout-minutes: 8
+        timeout-minutes: 3
         run: pnpm test:browser-policy
 
       - name: Enforce manual release policy and canonical repository links
@@ -193,26 +213,6 @@ jobs:
         run: |
           node --check scripts/release-asset-integrity.mjs
           node --test scripts/release-asset-integrity.test.mjs
-
-      - name: First-run acceptance fixture and honest evidence contracts
-        # Runs the deliberately failing baseline as an EXPECTED baseline, plus
-        # real temporary Git checkouts for repaired/out-of-scope scenarios.
-        # No model is invoked here: this cannot certify agent success.
-        run: |
-          node --check scripts/first-run-acceptance.mjs
-          node --test scripts/autonomous-task-live-eval.contract.test.mjs
-          node --test scripts/first-run-acceptance.contract.test.mjs
-          node --check scripts/first-run-live-e2e.mjs
-          node --test scripts/first-run-live-e2e.contract.test.mjs
-          node scripts/first-run-acceptance.mjs baseline --output "$RUNNER_TEMP/little-monkey-first-run-baseline.json"
-
-      - name: Upload real first-run baseline evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: first-run-baseline
-          path: ${{ runner.temp }}/little-monkey-first-run-baseline.json
-          if-no-files-found: error
 
       - name: Install/upgrade smoke-test logic
         # The decision logic only. The install itself runs in `release.yml`,
