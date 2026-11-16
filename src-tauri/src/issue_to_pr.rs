@@ -140,6 +140,9 @@ pub struct IssueToPrRun {
     pub pr_url: Option<String>,
     #[serde(default)]
     pub checks: Vec<CheckOutcome>,
+    /// Fences overlapping check processes and cancellation across restarts.
+    #[serde(default)]
+    pub verification_generation: u64,
     /// Independent reviewer evidence tied to the exact tested owned diff.
     #[serde(default)]
     pub review_evidence: Option<ReviewEvidence>,
@@ -520,6 +523,7 @@ pub async fn issue_to_pr_start(
         pr_number: None,
         pr_url: None,
         checks: Vec::new(),
+        verification_generation: 0,
         review_evidence: None,
         ci_history: Vec::new(),
         ci_head_oid: None,
@@ -700,6 +704,10 @@ pub async fn issue_to_pr_run_checks(
         ));
     }
     run.status = "checking".to_string();
+    run.verification_generation = run.verification_generation.checked_add(1)
+        .ok_or_else(|| "Verification generation exhausted".to_string())?;
+    run.review_evidence = None;
+    let generation = run.verification_generation;
     run.updated_at_ms = now_ms()?;
     runs.insert(run.run_id.clone(), run.clone());
     save_runs_to(&path, &runs)?;
@@ -770,6 +778,11 @@ pub async fn issue_to_pr_run_checks(
 
     let mut runs = load_runs_from(&path);
     let mut run = require_run(&runs, &run_id)?;
+    if run.status != "checking" || run.verification_generation != generation {
+        // Cancellation or a newer verifier took ownership during the
+        // subprocess. Preserve their authoritative state and evidence.
+        return Err("Stale verification completion ignored: run cancelled, moved on, or superseded".to_string());
+    }
     run.checks = outcomes;
     run.review_evidence = None; // New verification invalidates any prior diff review.
     run.status = if all_passed {
@@ -1287,6 +1300,7 @@ mod tests {
             pr_number: None,
             pr_url: None,
             checks: Vec::new(),
+            verification_generation: 0,
             review_evidence: None,
             ci_history: Vec::new(),
             ci_head_oid: None,
@@ -1527,6 +1541,23 @@ mod tests {
         assert_eq!(settled_ci_verdict("failed", &head, &checks, Some(&persisted), 31_000), "failed");
         let accepted = CiObservation { verdict: "passed".to_string(), ..persisted };
         assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&accepted), 31_100), "passed");
+    }
+
+    #[test]
+    fn verification_generation_survives_restart_and_fences_outdated_checks() {
+        let mut run = fixture_run("owner/repo", 42, 1, "checking");
+        run.verification_generation = 2;
+        let recovered: IssueToPrRun = serde_json::from_str(
+            &serde_json::to_string(&run).unwrap()
+        ).unwrap();
+        assert_eq!(recovered.verification_generation, 2);
+        assert_eq!(recovered.status, "checking");
+        let mut cancelled = recovered.clone();
+        cancelled.status = "cancelled".to_string();
+        assert!(cancelled.status != "checking" || cancelled.verification_generation != 2);
+        let mut superseded = recovered;
+        superseded.verification_generation += 1;
+        assert!(superseded.verification_generation != 2);
     }
 
     #[test]
