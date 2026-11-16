@@ -38,6 +38,14 @@ graph and production reachability must be verified after every proposed upgrade.
    remediated bytes. A clean `cargo audit` is necessary but not sufficient for
    release readiness.
 
+A separate [unprivileged security-fix preview](../.github/workflows/security-fix-preview.yml)
+tries compatible updates to Quinn, vodozemac and a jointly pinned Wasmtime/WASI
+patch pair, then uploads its exact `Cargo.lock`/`Cargo.toml` diff and
+remaining audit findings. It **does not push changes** or establish successful
+compilation; any resulting patch still needs cross-platform checks before it
+can be merged. The breaking rmcp 2.x→3.9 migration and SQLite bindings
+coordination remain explicitly unattempted in that preview.
+
 The **Release** workflow now invokes `cargo audit --file
 src-tauri/Cargo.lock` and `pnpm audit --prod --audit-level high` before
 building, on top of its explicit manual approval and acceptance evidence URL.
