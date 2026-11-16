@@ -319,6 +319,42 @@ describe("every desktop send is a durable ingress turn", () => {
 });
 
 describe("long-lived cross-window daemon observation", () => {
+  it("repairs a stale cached message index without overwriting a different message", async () => {
+    vi.useFakeTimers();
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value); },
+    });
+    seedSession("s-1");
+    useSessionStore.getState().addMessage("s-1", {
+      role: "user", content: "keep this message",
+    }, true);
+    const { saveActiveDaemonTurn } = await import("./daemonDesktopTurn");
+    saveActiveDaemonTurn({
+      sessionId: "s-1", turnId: "turn-cache", runId: "run-cache",
+      assistantIndex: 0, lastSequence: 10, output: "incomplete prefix",
+    });
+    mocks.recoverableDesktopTurns.mockRejectedValue(new Error("daemon restarting"));
+    let dispose: (() => void) | undefined;
+    try {
+      dispose = recoverDaemonDesktopTurns();
+      await vi.advanceTimersByTimeAsync(1);
+      const observed = mocks.watchDaemonDesktopTurn.mock.calls[0][0];
+      expect(observed).toMatchObject({
+        runId: "run-cache", assistantIndex: 1,
+        lastSequence: 0, output: "",
+      });
+      const session = useSessionStore.getState().sessions.find(s => s.id === "s-1")!;
+      expect(session.messages[0].content).toBe("keep this message");
+      expect(session.messages[1].durableTurn?.runId).toBe("run-cache");
+    } finally {
+      dispose?.();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("unmount detaches its observers but never cancels daemon execution", async () => {
     vi.useFakeTimers();
     mocks.recoverableDesktopTurns.mockResolvedValue({

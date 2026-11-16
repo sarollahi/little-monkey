@@ -2442,14 +2442,37 @@ export function recoverDaemonDesktopTurns(): () => void {
     // cached snapshot captured at mount would resurrect a removed old run.
     for (const link of loadActiveDaemonTurns()) {
       if (observedTerminals.has(link.runId)) continue;
-      if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) {
+      const store = useSessionStore.getState();
+      const session = store.sessions.find((session) => session.id === link.sessionId);
+      if (!session) {
         removeActiveDaemonTurn(link.runId);
         continue;
       }
       if (authoritativeSessions.has(link.sessionId) || awaitingAdmission.has(link.sessionId)) continue;
+      // The transcript can be edited/reordered after this cursor was saved.
+      // Never trust an old numeric position to identify an assistant row.
+      // A cached link may be a fallback when daemon discovery is temporarily
+      // unavailable, but run ID still owns its display row.
+      const foundIndex = durableAssistantIndex(session.messages, link.turnId, link.runId);
+      let safeLink = link;
+      if (foundIndex === null) {
+        const assistantIndex = session.messages.length;
+        store.addMessage(session.id, {
+          role: 'assistant',
+          content: 'Reconnecting to the resident runner…',
+          durableTurn: { turnId: link.turnId, runId: link.runId },
+        }, true);
+        // The old cached output may be only a suffix of the transcript. A
+        // freshly recreated row needs a complete ledger replay from zero.
+        safeLink = { ...link, assistantIndex, lastSequence: 0, output: '' };
+        saveActiveDaemonTurn(safeLink);
+      } else if (foundIndex !== link.assistantIndex) {
+        safeLink = { ...link, assistantIndex: foundIndex };
+        saveActiveDaemonTurn(safeLink);
+      }
       // An older cached link must not obscure a newer accepted run from
       // the authoritative store. The cache is only a safe fallback.
-      observe(link);
+      observe(safeLink);
     }
   };
   if (!isTauri()) {
