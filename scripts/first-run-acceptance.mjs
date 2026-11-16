@@ -47,7 +47,7 @@ const required = (flag) => {
   return result;
 };
 function testSummary(text) {
-  const number = (name) => Number(text.match(new RegExp("^# " + name + " (\\d+)$", "m"))?.[1] ?? NaN);
+  const number = (name) => Number(text.match(new RegExp("^#\\s+" + name + "\\s+(\\d+)\\s*$", "m"))?.[1] ?? NaN);
   return { tests: number("tests"), passed: number("pass"), failed: number("fail") };
 }
 function save(evidence) {
@@ -82,6 +82,7 @@ function main() {
       note: "Not measured by this fixture. Never infer agent performance from Node test duration.",
     },
     commands: { fixtureTests: test },
+    fixtureTAPSummary: summary,
     checks: {},
     outcome: "FAIL",
   };
