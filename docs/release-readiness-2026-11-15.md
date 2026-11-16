@@ -2,6 +2,11 @@
 
 **Decision: NOT RELEASE READY. Do not publish.**
 
+**Signing policy:** Production publishing is blocked if Tauri updater or
+Linux GPG keys/passphrase are absent. CI's unsigned candidate installer is
+intentionally separate, ephemeral and not a substitute for verifying signed
+published assets.
+
 **Actual CI evidence (2026-11-15):** the candidate-package workflow reached
 and built a real unsigned Debian installer but failed after bundling because
 it requested updater signing without a private key; this is addressed by
