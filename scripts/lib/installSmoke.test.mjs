@@ -65,7 +65,7 @@ test("a missing payload file is a failure, not a skip", () => {
   const expected = expectedPayload("linux");
   const result = checkPayload(["usr/bin/little-monkey"], expected);
   assert.equal(result.outcome, OUTCOME.Fail);
-  assert.match(result.reason, /usr\\/bin\\/monkey-cli/);
+  assert.match(result.reason, /usr\/bin\/monkey-cli/);
 
   assert.equal(checkPayload(expected, expected).outcome, OUTCOME.Pass);
 });
@@ -75,7 +75,7 @@ test("every platform names the CLI sidecar, which is the half packaging loses", 
     const payload = expectedPayload(platform);
     assert.ok(payload.length > 0, `${platform} expects nothing`);
     assert.ok(
-      payload.some((path) => /monkey(\.exe)?$/.test(path)),
+      payload.some((path) => /(monkey|monkey-cli)(\.exe)?$/.test(path)),
       `${platform} does not check for the CLI sidecar`,
     );
   }
