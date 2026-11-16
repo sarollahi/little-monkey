@@ -179,6 +179,33 @@ describe('runHeadlessAgent', () => {
     }
   });
 
+  it('refuses reviewer access to Git internals and parent traversal even with read-only tools', async () => {
+    for (const path of [
+      'owned/.git/config',
+      'owned/src/../.git/config',
+      'owned/../primary/secrets.json',
+    ]) {
+      mocks.attemptStream.mockReset();
+      mocks.executeToolCall.mockReset();
+      mocks.attemptStream
+        .mockResolvedValueOnce({
+          content: '', toolCalls: [toolCall('read_file', 'read-1', JSON.stringify({ path }))],
+          streamError: null, contentStarted: true,
+        })
+        .mockResolvedValueOnce({
+          content: 'No file read.', toolCalls: [], streamError: null, contentStarted: true,
+        });
+      const result = await runHeadlessAgent(baseParams({
+        toolProfile: 'explore',
+        requiredWorkspaceRoot: 'owned',
+        executionSource: 'issue-to-pr-review',
+      }));
+      expect(result.evidence.executedTools).toEqual([]);
+      expect(result.evidence.successfulFileReads).toBeUndefined();
+      expect(mocks.executeToolCall).not.toHaveBeenCalled();
+    }
+  });
+
   it('proves reviewer file coverage only from successful in-root read_file calls', async () => {
     mocks.attemptStream
       .mockResolvedValueOnce({
