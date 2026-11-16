@@ -76,7 +76,13 @@ coordinator uses the validated deterministic DAG and the actual owned-worktree
 headless coding agent; it disables the independent unmetered default planner
 that would otherwise run in the primary workspace. The model's code
 investigation, mutations and reviewer calls are all charged against the same
-persisted issue budget. Starting an issue
+persisted issue budget. The GitHub issue coder is deliberately NOT offered
+`run_shell`, background shell tools, or direct GitHub tools; it may inspect
+and edit files only inside the app-owned root. Its repository checks execute
+through the existing bounded native verifier, and commit/push/PR creation use
+the separately approved Git delivery layer. Repository test scripts are still
+executable project code and must be trusted or run on an isolated host;
+removing the model's shell tool does not sandbox the scripts themselves. Starting an issue
 requires an authenticated `gh` and a primary Git workspace whose GitHub
 remote matches the requested repository. The issue title, body, comments,
 review threads, and CI failure descriptions are **untrusted data**; none can
