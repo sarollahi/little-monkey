@@ -31,6 +31,35 @@ jobs:
         with:
           node-version: 24
 
+      - name: Preserve exact acceptance harness source for local reproducibility
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-contract-source-snapshot
+          path: |
+            package.json
+            scripts/ci-candidate-version.mjs
+            scripts/ci-candidate-version.test.mjs
+            scripts/autonomous-task-live-eval.mjs
+            scripts/autonomous-task-live-eval.contract.test.mjs
+            scripts/first-run-acceptance.mjs
+            scripts/first-run-acceptance.contract.test.mjs
+            scripts/first-run-live-e2e.mjs
+            scripts/first-run-live-e2e.contract.test.mjs
+            scripts/test-fixtures/fake-monkey-first-run-e2e.mjs
+            scripts/lib/installSmoke.mjs
+            scripts/lib/installSmoke.test.mjs
+            scripts/lib/firstRunEventMetrics.mjs
+            scripts/lib/firstRunEventMetrics.test.mjs
+            scripts/release-asset-integrity.mjs
+            scripts/release-asset-integrity.test.mjs
+            scripts/release-workflow-policy.contract.test.mjs
+            scripts/release-manifest-gate.mjs
+            scripts/release-manifest-gate.test.mjs
+            examples/first-run/normalize.mjs
+            examples/first-run/normalize.test.mjs
+          if-no-files-found: error
+          retention-days: 7
+
       - name: JavaScript parsing and Git prerequisites
         shell: bash
         run: |
