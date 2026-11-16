@@ -54,7 +54,10 @@ jobs:
             scripts/release-asset-integrity.test.mjs
             scripts/release-workflow-policy.contract.test.mjs
             scripts/release-manifest-gate.mjs
-            scripts/release-manifest-gate.test.mjs
+            scripts/release-ci-source-gate.mjs
+            scripts/release-ci-source-gate.test.mjs
+            scripts/release-manifest-gate.test.mjs \
+            scripts/release-ci-source-gate.test.mjs
             examples/first-run/normalize.mjs
             examples/first-run/normalize.test.mjs
           if-no-files-found: error
@@ -66,6 +69,7 @@ jobs:
           set -euo pipefail
           command -v git
           git --version
+          node --check scripts/release-ci-source-gate.mjs
           node --check scripts/ci-candidate-version.mjs
           node --check scripts/first-run-acceptance.mjs
           node --check scripts/first-run-live-e2e.mjs

@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   preflight:
@@ -48,6 +49,19 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Require passing CI on exact main source commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -X GET "repos/${{ github.repository }}/actions/runs" \
+            -f head_sha="$GITHUB_SHA" -f per_page=100 \
+            > "$RUNNER_TEMP/release-source-ci.json"
+          node scripts/release-ci-source-gate.mjs \
+            --metadata "$RUNNER_TEMP/release-source-ci.json" \
+            --commit "$GITHUB_SHA"
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile

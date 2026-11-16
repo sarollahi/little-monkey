@@ -26,6 +26,17 @@ only with disposable test workspaces and identities.
 6. Preserve the full, unedited console output, Git patch and evidence JSON.
    If the run failed, cancelled, or required a retry, label it accurately.
 
+## Exact main commit CI requirement
+
+The manually approved production Release workflow now queries GitHub Actions
+using the **exact `GITHUB_SHA` of the `main` branch checkout**. It refuses
+to build when no completed successful full `CI` workflow of event `push`
+exists for that SHA. A passing pull-request head (or older main commit) does
+not authorize publishing a new merge commit. If the latest matching CI is
+queued, failed, or cancelled, preflight fails closed. Required security,
+installer, hardware, signing, and human acceptance checks are additional
+gates and are not waived by this check.
+
 ## Final draft publication gate
 
 Before `release.yml` makes a draft public, it now fetches that exact draft's
