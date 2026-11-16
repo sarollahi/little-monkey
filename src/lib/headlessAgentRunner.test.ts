@@ -158,6 +158,39 @@ describe('runHeadlessAgent', () => {
     expect(recorder.complete).toHaveBeenCalledWith('Implemented and verified.');
   });
 
+  it('proves reviewer file coverage only from successful in-root read_file calls', async () => {
+    mocks.attemptStream
+      .mockResolvedValueOnce({
+        content: '', toolCalls: [toolCall('read_file', 'read-1', '{"path":"owned/src/fix.ts"}')],
+        streamError: null, contentStarted: true,
+      })
+      .mockResolvedValueOnce({
+        content: 'Reviewed the file.', toolCalls: [], streamError: null, contentStarted: true,
+      });
+    mocks.executeToolCall.mockResolvedValue('const fixed = true;');
+    const result = await runHeadlessAgent(baseParams({
+      toolProfile: 'explore', requiredWorkspaceRoot: 'owned',
+    }));
+    expect(result.outcome).toBe('completed');
+    expect(result.evidence.successfulFileReads).toEqual(['owned/src/fix.ts']);
+  });
+
+  it('does not count a failed read as reviewed-file coverage', async () => {
+    mocks.attemptStream
+      .mockResolvedValueOnce({
+        content: '', toolCalls: [toolCall('read_file', 'read-1', '{"path":"owned/src/fix.ts"}')],
+        streamError: null, contentStarted: true,
+      })
+      .mockResolvedValueOnce({
+        content: 'Could not inspect it.', toolCalls: [], streamError: null, contentStarted: true,
+      });
+    mocks.executeToolCall.mockResolvedValue('{"error":"permission denied"}');
+    const result = await runHeadlessAgent(baseParams({
+      toolProfile: 'explore', requiredWorkspaceRoot: 'owned',
+    }));
+    expect(result.evidence.successfulFileReads).toBeUndefined();
+  });
+
   it('offers only explore tools and records read-only workspace access for analysis runs', async () => {
     mocks.attemptStream.mockResolvedValue({
       content: 'Read-only analysis complete.',
