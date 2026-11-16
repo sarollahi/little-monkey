@@ -817,15 +817,50 @@ export async function watchDaemonDesktopTurn(
         callbacks.onProjection(projection);
         return projection;
       }
-      if (events.length > 0 && events[0].sequence > link.lastSequence + 1) {
-        // RunLedger writes contiguous per-run sequences. A gap is data loss
-        // or a damaged response, not permission to stitch model text together.
+      // The RunLedger status read and the events read happen concurrently.
+      // A new event may commit between them; when status claims there are
+      // unread events but the first read returned empty, read the page again
+      // before declaring corruption. Observing never resubmits a model call.
+      if (events.length === 0 && typeof run.lastSequence === "number" &&
+          run.lastSequence > link.lastSequence) {
+        try {
+          events = await loadRunEvents(link.runId, link.lastSequence, 1_000);
+        } catch (error) {
+          consecutiveReadFailures++;
+          projection = {
+            ...projection,
+            status: `Reconnecting to resident run events: ${String(error)}`,
+          };
+          callbacks.onProjection(projection);
+          await wait(Math.min(5_000, 250 * 2 ** Math.min(consecutiveReadFailures, 5)));
+          continue;
+        }
+      }
+      // Validate every envelope, not just the first in a page. Otherwise
+      // 1,2,4 silently concatenates fragments across a missing tool outcome.
+      let expectedSequence = link.lastSequence + 1;
+      for (const envelope of events) {
+        if (envelope.sequence === expectedSequence) {
+          expectedSequence++;
+          continue;
+        }
+        break;
+      }
+      if (events.length === 0 && typeof run.lastSequence === "number" &&
+          run.lastSequence > link.lastSequence ||
+          events.some((envelope, index) =>
+            envelope.sequence !== link.lastSequence + index + 1)) {
+        const firstGap = events.findIndex((envelope, index) =>
+          envelope.sequence !== link.lastSequence + index + 1);
+        const expected = firstGap < 0 ? link.lastSequence + 1
+          : link.lastSequence + firstGap + 1;
+        const received = firstGap < 0 ? "no events" : events[firstGap].sequence;
         projection = {
           ...projection,
           terminal: true,
           terminalStatus: "needs_reconciliation",
           status: "Durable event history is incomplete.",
-          error: `Run event cursor gap: expected ${link.lastSequence + 1}, received ${events[0].sequence}. Review the run ledger; no tools were restarted.`,
+          error: `Run event cursor gap: expected ${expected}, received ${received}. Review the run ledger; no tools were restarted.`,
         };
         callbacks.onProjection(projection);
         return projection;

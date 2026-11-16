@@ -451,6 +451,61 @@ describe("daemon desktop routing and event replay", () => {
     expect(mocks.daemonCancel).not.toHaveBeenCalled();
   });
 
+  it("refuses an interior ledger hole even when the first event is contiguous", async () => {
+    mocks.getRun.mockResolvedValue({ status: "running", lastSequence: 3 } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 1, event: { type: "model_delta",
+        payload: { channel: "assistant", text: "partial" } } },
+      { sequence: 3, event: { type: "completed", payload: { summary: "lost seq two" } } },
+    ] as RunEventEnvelopeWire[]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      output: "", error: expect.stringContaining("expected 2, received 3"),
+    });
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("retries an empty event page when run metadata advanced concurrently", async () => {
+    mocks.getRun.mockResolvedValue({ status: "succeeded", lastSequence: 1 } as RunRecord);
+    mocks.loadRunEvents
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { sequence: 1, event: { type: "model_delta",
+          payload: { channel: "assistant", text: "from the journal" } } },
+      ] as RunEventEnvelopeWire[]);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "succeeded",
+      output: "from the journal", lastSequence: 1,
+    });
+    expect(mocks.loadRunEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed when the journal reports events but no records can be read", async () => {
+    mocks.getRun.mockResolvedValue({ status: "succeeded", lastSequence: 3 } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValue([]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      error: expect.stringContaining("received no events"),
+    });
+    expect(mocks.loadRunEvents).toHaveBeenCalledTimes(2);
+  });
+
   it("renders approval, pause and reconciliation from authoritative run state", () => {
     const link = {
       output: "", status: "running", terminal: false, terminalStatus: null,
