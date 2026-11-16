@@ -47,6 +47,7 @@ function fixtureRun(overrides: Partial<IssueToPrRun> = {}): IssueToPrRun {
     prNumber: null,
     prUrl: null,
     checks: [],
+    verificationGeneration: 0,
     reviewEvidence: null,
     ciHistory: [],
     ciHeadOid: null,
