@@ -168,9 +168,13 @@ Live GitHub verification requires the operator's authenticated `gh` account
 and write access to the repo for push/PR mutations; an actual GitHub Actions
 run for the new draft PR is the authoritative remote acceptance test.
 Monitoring starts from the primary desktop's boot lifecycle even if the
-Issue-to-PR panel is never opened. Restarting a run stopped during local
-checking reattaches the existing owned diff, reruns authoritative tests and
-independent review, and does not replay coding edits. If GitHub already
+Issue-to-PR panel is never opened. Restarting a run stopped during implementation checks the authoritative
+owned-worktree identity and actual changed files before doing anything.
+A partially edited branch proceeds to fresh authoritative checks and
+independent review instead of replaying code mutations; an untouched branch
+can resume coding. Restarting a run stopped during local checking likewise
+reattaches the existing owned diff, reruns authoritative tests and independent
+review, and does not replay coding edits. If GitHub already
 created an approved draft PR but local persistence stopped, startup can
 read-only reconcile the exact repository, owned branch, base, draft state
 and HEAD. Ambiguous or stale results never trigger a duplicate write. Verified `ready` runs keep being polled and
