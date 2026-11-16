@@ -9,7 +9,7 @@ These are the **13 reported vulnerability findings**, grouped by crate. They are
 not 13 independently affected direct dependencies. The lockfile's transitive
 graph and production reachability must be verified after every proposed upgrade.
 
-| Lockfile crate | Installed | RustSec findings | Reported fixed version |
+| Lockfile crate | Original version (2026-11-15) | RustSec findings | Reported fixed version |
 | --- | --- | --- | --- |
 | `libsqlite3-sys` | 0.38.2 | RUSTSEC-2026-0459 | 0.39.0+ |
 | `quinn-proto` | 0.11.18 | RUSTSEC-2026-0524, -0523 | 0.11.19+ |
@@ -18,6 +18,33 @@ graph and production reachability must be verified after every proposed upgrade.
 | `vodozemac` | 0.11.0 | RUSTSEC-2026-0445, -0510, -0451 | 0.11.2+ |
 | `wasmtime` | 48.0.7 | RUSTSEC-2026-0424, -0422, -0423 | 48.0.8+ |
 | `wasmtime-wasi` | 48.0.7 | RUSTSEC-2026-0420 | 48.0.8+ |
+
+## Compatible dependency fixes now committed (2026-11-16)
+
+[The actual isolated RustSec preview](https://github.com/sarollahi/little-monkey/actions/runs/43827611219)
+successfully ran `cargo update`, generated a Cargo.lock/Cargo.toml
+patch with valid locked metadata, and reduced the measured audit
+from **13 findings to 3** in its disposable checkout.
+
+That exact compatible version/checksum/dependency change has been applied
+to this draft PR: Quinn protocol/UDP, vodozemac and jointly pinned
+Wasmtime/WASI 48.0.8, including all transitive Cranelift/Pulley crates.
+
+**This patch's cross-platform compilation and security audit are still
+pending on the exact new commit.** Passing in the preview is not equivalent
+to a completed CI run after the patch is applied.
+
+The **three remaining preview findings** are:
+- `libsqlite3-sys 0.38.2` — `RUSTSEC-2026-0459`. Patched upstream at
+  0.39.0+, but this project shares one SQLite `links` crate with
+  `matrix-sdk-sqlite 0.19.1` / `rusqlite 0.40.2`; upgrading only our
+  direct rusqlite does not resolve the shared native library.
+- `rmcp 2.2.0` — `RUSTSEC-2026-0457` and `RUSTSEC-2026-0462`.
+  The fixed MCP 3.9+ SDK changes protocol and OAuth APIs; the project has
+  extensive MCP transports, authorization, and test-server integration,
+  so migrating requires compiler and security-regression evidence.
+
+Neither remaining finding is ignored or suppressed. **Release: BLOCKED.**
 
 ## Remediation sequence
 
@@ -38,16 +65,14 @@ graph and production reachability must be verified after every proposed upgrade.
    remediated bytes. A clean `cargo audit` is necessary but not sufficient for
    release readiness.
 
-A separate [unprivileged security-fix preview](../.github/workflows/security-fix-preview.yml)
-tries compatible updates to Quinn, vodozemac and a jointly pinned Wasmtime/WASI
-patch pair, then uploads its exact `Cargo.lock`/`Cargo.toml` diff and
-remaining audit findings. It **does not push changes** or establish successful
-compilation; any resulting patch still needs cross-platform checks before it
-can be merged. The breaking rmcp 2.x→3.9 migration and SQLite bindings
-coordination remain explicitly unattempted in that preview.
+The [security-fix preview](../.github/workflows/security-fix-preview.yml)
+remains a **non-publishing verification tool** and is now idempotent for
+the applied compatible patches. It never waives audit failures. The major
+rmcp migration and SQLite/Matrix SDK dependency coordination remain open.
 
 The **Release** workflow now invokes `cargo audit --file
 src-tauri/Cargo.lock` and `pnpm audit --prod --audit-level high` before
 building, on top of its explicit manual approval and acceptance evidence URL.
-This change **does not fix any advisory**: the gate stays blocked until the
-dependencies themselves are fixed and verified.
+The compatible upgrades eliminate ten reported findings **in the preview's
+measured lockfile**. The gate stays blocked on the three remaining
+vulnerabilities, and all patches require fresh cross-platform validation.

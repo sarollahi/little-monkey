@@ -7,20 +7,32 @@ Linux GPG keys/passphrase are absent. CI's unsigned candidate installer is
 intentionally separate, ephemeral and not a substitute for verifying signed
 published assets.
 
-**Actual CI evidence (2026-11-15):** the candidate-package workflow reached
-and built a real unsigned Debian installer but failed after bundling because
-it requested updater signing without a private key; this is addressed by
-disabling signing *only for the test candidate*. The same source run's Rust
-E2E jobs could not find the actual compiled CLI (fixed by prebuilding the
-real CLI), and the canonical URL scan matched a historical fixture and its
-own self-test (exempted explicitly). A first-run or package pass is therefore
-still **not confirmed** for any later commit. The native-Whisper portable
-flags checks failed because their CMake cache files were absent. A forced
-rebuild and fail-closed cache discovery is proposed but not yet verified.
-Finally, the actual RustSec audit reported **13 vulnerabilities**; see
-[the vulnerability remediation register](security-release-blockers-2026-11-15.md).
-The release now requires a passing Rust and npm dependency audit,
-so the outstanding vulnerabilities remain hard blockers.
+**Actual execution evidence (2026-11-16):** At commit
+`06fd2c764461`, [Linux x64 candidate E2E](https://github.com/sarollahi/little-monkey/actions/runs/43827611063)
+**PASSED**. The runner performed real Debian package-manager installation
+(`1.12.0`), upgrade (`1.12.1`), and downgrade (`1.12.0`), and executed
+the system-installed `monkey-cli` at each stage. Package versions, a
+synthetic user-file canary, digest checks and exact candidate-build evidence
+were captured. This is *not* a GUI or in-app updater rollback result.
+The same commit's [three-OS Rust test matrix](https://github.com/sarollahi/little-monkey/actions/runs/43827611298)
+**PASSED** on Linux, macOS and Windows; the overall CI remained red because
+the real-browser policy test hung during cleanup, first-run fixture contracts
+were failing, and RustSec advisories remained.
+
+The failures were traced to inherited `NODE_TEST_CONTEXT` suppressing
+nested TAP tests, the browser's unbounded CDP/cleanup behavior, and macOS
+Bash 3.2 lacking `mapfile` in Whisper CPU-baseline verification. Fixes
+are committed, but outcomes on the latest head are **pending**.
+
+A completed [RustSec preview](https://github.com/sarollahi/little-monkey/actions/runs/43827611219)
+reduced the actual audit from 13 findings to three after compatible
+Quinn/vodozemac/Wasmtime updates in a disposable checkout. The exact
+compatible patches were committed to this PR; see
+[security blockers](security-release-blockers-2026-11-15.md).
+The remaining SQLite and MCP advisories are release blockers until
+resolved and tested, regardless of whether the package lifecycle passes.
+The latest PR also adds detached-GPG verification for the downloaded
+previous release; **that added check has not passed CI yet.**
 
 This report reflects source inspection and unexecuted candidate checks. See
 [the full acceptance matrix](release-acceptance.md). It is not updated
@@ -58,8 +70,9 @@ manufactured execution results.
 | Intentionally broken first-run baseline | **NOT YET VERIFIED** | CI runs real Node fixture and uploads raw JSON; an expected failure is not model success |
 | Architecture selection regressions | **NOT YET VERIFIED** | CI runs existing `pnpm test:install-smoke` |
 | Asset SHA-256 regression tests | **NOT YET VERIFIED** | CI runs `node --test scripts/release-asset-integrity.test.mjs` |
-| Frontend typecheck, build, UI tests and native cross-OS tests | **NOT YET VERIFIED ON THIS BRANCH** | Existing CI, check result at exact commit |
-| Linux candidate package build and actual Ubuntu `apt` installation | **NOT YET VERIFIED** | Dedicated CI job builds an unsigned candidate and attempts real older→candidate→older apt lifecycle; requires completed run; not the in-app rollback |
+| Native Rust cross-OS test matrix | **PASSED AT COMMIT 06fd2c7** | Linux, macOS, Windows job conclusions all success; later dependency patches need retest |
+| Full frontend and browser CI | **FAILED AT COMMIT 06fd2c7** | Browser policy test hung; CDP cleanup is now bounded, but updated head remains unverified |
+| Linux candidate package build and real Ubuntu `apt` install / upgrade / downgrade | **PASSED AT COMMIT 06fd2c7** | Actual 1.12.0 → 1.12.1 → 1.12.0 versions and installed CLI verified. New GPG check needs retest at latest SHA; not the in-app updater |
 | Clean physical install on advertised OS/architectures | **UNVERIFIED** | CI Ubuntu package installation alone cannot verify the six real end-user targets |
 | Real installed CLI/daemon/model coding task | **UNVERIFIED** | Opt-in self-hosted harness now records terminal run state and raw evidence; no real run submitted |
 | Genuine model coding task with permissions and independent diff review | **UNVERIFIED** | Need exact model/run/driver + raw logs and human permission check |
@@ -68,9 +81,9 @@ manufactured execution results.
 | Startup/idle RSS or PSS/first-token/task duration/cancellation cleanup | **UNVERIFIED** | No measurements fabricated |
 | Physical LAN/TLS and HTTP compatibility across adapters | **UNVERIFIED** | Required for a later server migration, not rewired here |
 
-This report deliberately uses **NOT YET VERIFIED** instead of claiming
-green gates while CI is queued. Read actual Action job conclusions and their
-artifacts before changing any status.
+Results are scoped to their **exact commit**. A prior passing package or
+Rust test cannot certify subsequent dependency, security or signing changes.
+No release-readiness claim follows merely from queued tests.
 
 ## Remaining external dependencies and physical hardware
 

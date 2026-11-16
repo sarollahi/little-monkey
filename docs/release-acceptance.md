@@ -38,9 +38,24 @@ gate does **not** itself validate signing-key identity, Apple notarization,
 OS code signatures, or the bytes of every artifact; those still require
 independent integrity checks and the human acceptance report.
 
+## Execution results recorded on 2026-11-16
+
+At commit `06fd2c764461`, the real [Linux x64 candidate package job](https://github.com/sarollahi/little-monkey/actions/runs/43827611063)
+passed an actual **1.12.0 → 1.12.1 → 1.12.0** apt lifecycle and system
+CLI version checks. It also retained the synthetic file and source/manifest
+evidence. It did not run user-database migrations, GUI onboarding or Tauri's
+in-app updater. Subsequent commits introduce the previous release's detached
+GPG verification and patched Rust dependencies, so the latest candidate
+must pass again before publication.
+
+The [RustSec remediation preview](https://github.com/sarollahi/little-monkey/actions/runs/43827611219)
+measured three remaining findings after applying compatible dependency
+patches. Those updates are now in the draft PR but are not yet confirmed
+passing on the latest Rust/native/installer matrices.
+
 ## Available execution paths
 
-The real CI run for commit `440a1969` on November 15, 2026 found
+An earlier real CI run for commit `440a1969` on November 15, 2026 found
 failing source-level acceptance checks (canonical link scan, Rust daemon
 CLI location), a candidate Debian bundle signing failure, and 13 current
 RustSec vulnerabilities. Later commits address the first three findings,
