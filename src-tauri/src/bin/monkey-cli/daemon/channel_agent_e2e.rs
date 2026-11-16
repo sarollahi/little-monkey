@@ -110,8 +110,21 @@ pub(super) fn cli_beside_test_binary(_current: &Path) -> Option<PathBuf> {
 /// One exec per candidate, once per test run.
 fn locate_cli_binary() -> PathBuf {
     let current = std::env::current_exe().expect("test binary path");
-    let deps = current.parent().expect("deps directory").to_path_buf();
-    let profile = deps.parent().expect("profile directory").to_path_buf();
+    // tauri-build copies externalBin into target/<profile>/build/<crate>/<hash>/out
+    // as part of ordinary cargo test compilation. A test process may be
+    // running from that copied harness, not target/<profile>/deps. Ascend to
+    // the real Cargo profile directory rather than assuming the immediate
+    // parent is deps (which made five daemon E2Es fail on all OSes).
+    let profile = current.ancestors()
+        .find(|dir| {
+            dir.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "debug" || name == "release")
+                && dir.join("deps").is_dir()
+        })
+        .map(Path::to_path_buf)
+        .expect("find Cargo debug/release profile enclosing the test binary");
+    let deps = profile.join("deps");
     let name = if cfg!(windows) {
         "monkey-cli.exe"
     } else {
