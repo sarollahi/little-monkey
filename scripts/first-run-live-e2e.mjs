@@ -11,6 +11,7 @@ import { tmpdir, arch, platform, release } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { metricsFromEventJsonl } from "./lib/firstRunEventMetrics.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const flags = process.argv.slice(2);
@@ -43,6 +44,8 @@ const summary = {
   environment: { os: platform(), osRelease: release(), arch: arch(), node: process.version },
   candidate: { appVersionOperatorDeclared: expectedVersion, runtimeOperatorDeclared: runtime, targetOperatorDeclared: target },
   runtimeIdentityVerified: false,
+  firstTokenEvidence: "UNMEASURED: no real model stream parsed",
+  observedAgentEvents: 0,
   daemonTerminalStatus: null,
   runId: null,
   measurable: {
@@ -151,6 +154,10 @@ try {
   const rawAttach = capture("task-attach", monkey,
     ["task", "attach", summary.runId, "--follow", "--json"]);
   writeEvidence("agent-events.jsonl", rawAttach);
+  const streamMetrics = metricsFromEventJsonl(rawAttach, summary.runId);
+  summary.measurable.firstTokenMs = streamMetrics.firstTokenMs;
+  summary.firstTokenEvidence = streamMetrics.firstTokenEvidence;
+  summary.observedAgentEvents = streamMetrics.eventCount;
   const rawStatus = capture("task-status", monkey, ["task", "status",
     "--run-id", summary.runId, "--json"]);
   summary.daemonTerminalStatus = observedRunStatus(rawStatus, summary.runId);
