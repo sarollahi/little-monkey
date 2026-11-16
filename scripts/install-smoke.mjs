@@ -143,7 +143,7 @@ function unpack(plan, artifactsDir, into) {
 
 /** The one payload path that is also a runnable CLI, if it was installed. */
 function cliPath(root, installed) {
-  const sidecar = installed.find((path) => /(^|\/)monkey(\.exe)?$/.test(path));
+  const sidecar = installed.find((path) => /(^|\/)(monkey|monkey-cli)(\.exe)?$/.test(path));
   return sidecar ? join(root, ...sidecar.split("/")) : null;
 }
 
