@@ -45,7 +45,7 @@ function invoke(dir, mode, name, extra = []) {
 test("baseline actually runs the broken fixture, records raw failing TAP output and no fictitious metrics", (t) => {
   const dir = fixture(t);
   const { result, evidence } = invoke(dir, "baseline", "baseline.json");
-  assert.equal(result.status, 0);
+  assert.equal(result.status, 0, JSON.stringify({ stderr: result.stderr, stdout: result.stdout, evidence }, null, 2));
   assert.equal(evidence.outcome, "EXPECTED_BASELINE_FAILURE");
   assert.equal(evidence.checks.fixtureTests, true);
   assert.notEqual(evidence.commands.fixtureTests.exitCode, 0);
@@ -73,7 +73,7 @@ test("independently verifies a real code change, scope and additional tab regres
   writeFileSync(suite, readFileSync(suite, "utf8") +
     "\ntest('tabs collapse', () => { assert.equal(normalizeUserId('Ada\\tLovelace'), 'ada-lovelace'); });\n");
   const { result, evidence } = invoke(dir, "verify", "pass.json");
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, JSON.stringify({ stderr: result.stderr, stdout: result.stdout, evidence }, null, 2));
   assert.equal(evidence.outcome, "FUNCTIONAL_PASS_MANUAL_REVIEW_REQUIRED");
   for (const key of ["fixtureTests", "inScope", "bothFilesChanged",
     "diffWhitespace", "tabRegressionAdded", "independentProbe"]) {
