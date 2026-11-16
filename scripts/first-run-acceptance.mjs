@@ -29,7 +29,13 @@ const output = value("--output");
 const observedAt = new Date().toISOString();
 
 function execute(command, argv, cwd) {
-  const run = spawnSync(command, argv, { cwd, encoding: "utf8", timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  // node --test sets NODE_TEST_CONTEXT for its own subprocesses. Propagating
+  // that internal marker to our independent, nested fixture runner makes Node
+  // silently skip all fixture tests (exit code 0, empty TAP) instead of running
+  // the expected three cases. A new Node test CLI is a separate test root.
+  const env = { ...process.env };
+  if (command === process.execPath) delete env.NODE_TEST_CONTEXT;
+  const run = spawnSync(command, argv, { cwd, env, encoding: "utf8", timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
   return {
     command: [command, ...argv].join(" "),
     exitCode: run.status,
