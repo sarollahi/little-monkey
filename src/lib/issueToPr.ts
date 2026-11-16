@@ -61,6 +61,7 @@ export interface IssueToPrRun {
   prNumber: number | null;
   prUrl: string | null;
   checks: IssueToPrCheckOutcome[];
+  verificationGeneration: number;
   reviewEvidence: IssueToPrReviewEvidence | null;
   ciHistory: IssueToPrCiObservation[];
   ciHeadOid: string | null;
