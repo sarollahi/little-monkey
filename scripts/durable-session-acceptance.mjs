@@ -145,7 +145,7 @@ try {
     console.log(`\n=== ${suite.name} ===\n${suite.command} ${suite.argv.join(" ")}`);
     const res = await execute(suite);
     const testCount = suite.requireTests
-      ? [...res.outputTail.matchAll(/test result: ok\\. (\\d+) passed/g)]
+      ? [...res.outputTail.matchAll(/test result: ok\. (\d+) passed/g)]
           .reduce((count, match) => count + Number(match[1]), 0)
       : null;
     const emptySuite = suite.requireTests && testCount === 0;
