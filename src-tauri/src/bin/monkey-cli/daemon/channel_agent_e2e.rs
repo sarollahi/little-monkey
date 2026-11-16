@@ -123,8 +123,12 @@ fn locate_cli_binary() -> PathBuf {
         "monkey-cli"
     };
 
+    // Cargo's redirected test artifact directory can have no deps/ at
+    // all. The standalone binary is built by test:rust and is the preferred
+    // candidate; refusing an absent deps/ avoids failing before trying it.
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&deps)
-        .expect("read deps")
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
@@ -140,8 +144,8 @@ fn locate_cli_binary() -> PathBuf {
         .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
         .collect();
     candidates.sort_by(|left, right| right.0.cmp(&left.0));
-    let mut ordered: Vec<PathBuf> = candidates.into_iter().map(|(_, path)| path).collect();
-    ordered.push(profile.join(name));
+    let mut ordered: Vec<PathBuf> = vec![profile.join(name)];
+    ordered.extend(candidates.into_iter().map(|(_, path)| path));
 
     for candidate in &ordered {
         if is_the_cli(candidate) {
@@ -149,8 +153,9 @@ fn locate_cli_binary() -> PathBuf {
         }
     }
     panic!(
-        "no monkey-cli binary found beside the test harness in {}; \
-         build it with `cargo build --bin monkey-cli`",
+        "no real monkey-cli binary found at {} or among {} artifacts; \
+         build it with `cargo build --bin monkey-cli` before testing",
+        profile.join(name).display(),
         deps.display()
     );
 }

@@ -57,7 +57,7 @@
     "test:managed-runtime": "node --check scripts/stage-managed-runtime.mjs && node --test scripts/lib/managedRuntimeManifest.test.mjs",
     "test:wake-assets": "node --test scripts/lib/wakeWordAssets.test.mjs",
     "test:wake-walkthrough": "node scripts/run-wake-walkthrough.mjs",
-    "test:rust": "pnpm stage:cli:placeholder && pnpm stage:sherpa-runtime && cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:rust": "pnpm stage:cli:placeholder && pnpm stage:sherpa-runtime && cargo build --manifest-path src-tauri/Cargo.toml --bin monkey-cli && cargo test --manifest-path src-tauri/Cargo.toml",
     "contract:check": "cargo test --manifest-path src-tauri/Cargo.toml --test contract_abi",
     "i18n:lint": "vitest run src/lib/i18n/keyLint.test.ts src/lib/i18n/localeSync.test.ts",
     "a11y": "vitest run src/lib/a11yAudit.test.tsx",
