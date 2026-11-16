@@ -303,6 +303,9 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Bootstrap Tauri build-script sidecar path before actual CLI compilation
+        run: node scripts/ensure-cli-sidecar-placeholder.mjs
+
       - name: Build actual CLI used by the daemon E2E tests on every OS
         shell: bash
         run: |
