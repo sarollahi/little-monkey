@@ -158,6 +158,27 @@ describe('runHeadlessAgent', () => {
     expect(recorder.complete).toHaveBeenCalledWith('Implemented and verified.');
   });
 
+  it('blocks issue agent file writes to Git metadata and GitHub workflow directories', async () => {
+    mocks.toolsForProfile.mockReturnValue([
+      { type: 'function', function: { name: 'write_file', parameters: {} } },
+    ]);
+    for (const path of ['owned/.git/config', 'owned/.github/workflows/ci.yml', 'owned/.github/actions/unsafe/action.yml', 'owned/src/../.git/config']) {
+      mocks.attemptStream.mockReset();
+      mocks.executeToolCall.mockReset();
+      mocks.attemptStream.mockResolvedValueOnce({
+        content: '', toolCalls: [toolCall('write_file', 'blocked', JSON.stringify({ path, content: 'unsafe' }))],
+        streamError: null, contentStarted: true,
+      }).mockResolvedValueOnce({
+        content: 'Finished.', toolCalls: [], streamError: null, contentStarted: true,
+      });
+      const result = await runHeadlessAgent(baseParams({
+        requiredWorkspaceRoot: 'owned', executionSource: 'issue-to-pr',
+      }));
+      expect(result.evidence.executedTools).toEqual([]);
+      expect(mocks.executeToolCall).not.toHaveBeenCalled();
+    }
+  });
+
   it('proves reviewer file coverage only from successful in-root read_file calls', async () => {
     mocks.attemptStream
       .mockResolvedValueOnce({
