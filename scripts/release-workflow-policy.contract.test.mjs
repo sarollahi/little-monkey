@@ -24,4 +24,7 @@ test("publication is downstream of installer smoke and guarded preflight", () =>
   assert.match(workflow, /Refuse overwriting an already published release/);
   assert.match(workflow, /cargo audit --file src-tauri\/Cargo.lock/);
   assert.match(workflow, /pnpm audit --prod --audit-level high/);
+  assert.match(workflow, /Enforce production updater and Linux installer signing credentials/);
+  assert.match(workflow, /Missing Linux installer signing credentials/);
+  assert.doesNotMatch(workflow, /skipping installer signatures/i);
 });
