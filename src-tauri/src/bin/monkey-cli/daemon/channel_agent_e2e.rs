@@ -108,14 +108,8 @@ pub(super) fn cli_beside_test_binary(_current: &Path) -> Option<PathBuf> {
 /// `deps/` plus that path, newest first, and each is asked what it is: a test
 /// harness answers `--list` with its test names, and the CLI refuses the flag.
 /// One exec per candidate, once per test run.
-fn locate_cli_binary() -> PathBuf {
-    let current = std::env::current_exe().expect("test binary path");
-    // tauri-build copies externalBin into target/<profile>/build/<crate>/<hash>/out
-    // as part of ordinary cargo test compilation. A test process may be
-    // running from that copied harness, not target/<profile>/deps. Ascend to
-    // the real Cargo profile directory rather than assuming the immediate
-    // parent is deps (which made five daemon E2Es fail on all OSes).
-    let profile = current.ancestors()
+fn cargo_profile_of_test_binary(current: &Path) -> Option<PathBuf> {
+    current.ancestors()
         .find(|dir| {
             dir.file_name()
                 .and_then(|name| name.to_str())
@@ -123,6 +117,34 @@ fn locate_cli_binary() -> PathBuf {
                 && dir.join("deps").is_dir()
         })
         .map(Path::to_path_buf)
+}
+
+#[test]
+fn finds_cli_profile_from_both_regular_deps_and_tauri_sidecar_out_dir() {
+    let root = std::env::temp_dir().join(format!(
+        "lm-cli-profile-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let profile = root.join("target").join("debug");
+    std::fs::create_dir_all(profile.join("deps")).expect("create deps");
+    std::fs::create_dir_all(profile.join("build").join("little-monkey").join("hash").join("out"))
+        .expect("create Tauri build out");
+    let normal = profile.join("deps").join("monkey_cli-hash");
+    let tauri_copy = profile.join("build").join("little-monkey").join("hash").join("out").join("monkey-cli");
+    assert_eq!(cargo_profile_of_test_binary(&normal), Some(profile.clone()));
+    assert_eq!(cargo_profile_of_test_binary(&tauri_copy), Some(profile.clone()));
+    std::fs::remove_dir_all(root).expect("cleanup fixture");
+}
+
+fn locate_cli_binary() -> PathBuf {
+    let current = std::env::current_exe().expect("test binary path");
+    // tauri-build copies externalBin into target/<profile>/build/<crate>/<hash>/out
+    // as part of ordinary cargo test compilation. A test process may be
+    // running from that copied harness, not target/<profile>/deps. Ascend to
+    // the real Cargo profile directory rather than assuming the immediate
+    // parent is deps (which made five daemon E2Es fail on all OSes).
+    let profile = cargo_profile_of_test_binary(&current)
         .expect("find Cargo debug/release profile enclosing the test binary");
     let deps = profile.join("deps");
     let name = if cfg!(windows) {
