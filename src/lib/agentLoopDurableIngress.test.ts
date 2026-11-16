@@ -18,6 +18,9 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ label: "main" }),
+}));
 
 /** Every in-process model round trip. This must stay empty. */
 const streamed: unknown[] = [];
@@ -37,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   submitDaemonDesktopTurn: vi.fn(),
   watchDaemonDesktopTurn: vi.fn(),
   ingressTurnResume: vi.fn(),
+  recoverableDesktopTurns: vi.fn(),
 }));
 
 vi.mock("./daemonDesktopTurn", async (importOriginal) => ({
@@ -48,9 +52,10 @@ vi.mock("./daemonDesktopTurn", async (importOriginal) => ({
 vi.mock("./ingressClient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./ingressClient")>()),
   ingressTurnResume: mocks.ingressTurnResume,
+  recoverableDesktopTurns: mocks.recoverableDesktopTurns,
 }));
 
-import { runAgentTurn } from "./agentLoop";
+import { recoverDaemonDesktopTurns, runAgentTurn } from "./agentLoop";
 import { useModelStore } from "../store/modelStore";
 import { usePermissionStore } from "../store/permissionStore";
 import { useSessionStore, type ChatSession } from "../store/sessionStore";
@@ -128,6 +133,7 @@ beforeEach(() => {
   mocks.submitDaemonDesktopTurn.mockReset();
   mocks.watchDaemonDesktopTurn.mockReset();
   mocks.ingressTurnResume.mockReset();
+  mocks.recoverableDesktopTurns.mockReset();
   mocks.submitDaemonDesktopTurn.mockResolvedValue({ job_id: "job-1", run_id: "run-1", state: "queued" });
   mocks.watchDaemonDesktopTurn.mockResolvedValue({
     output: "the resident runner answered",
@@ -308,5 +314,39 @@ describe("every desktop send is a durable ingress turn", () => {
     expect(streamed).toEqual([]);
     const messages = useSessionStore.getState().sessions[0].messages;
     expect(messages[messages.length - 1].content).toContain("No files changed");
+  });
+});
+
+describe("long-lived cross-window daemon observation", () => {
+  it("discovers a newer run after the previous run was already observed as terminal", async () => {
+    vi.useFakeTimers();
+    const sample = (run: string, created: number) => ({
+      ingress_id: "ing-" + run,
+      source: "desktop", source_account_id: "s-1",
+      source_event_id: "turn-" + run, state: "queued",
+      created_at_ms: created, run_id: run, job_id: "job-" + run,
+      run_state: "succeeded", execution_version: 1,
+    });
+    const oldRun = sample("older", 100);
+    const newRun = sample("newer", 200);
+    mocks.recoverableDesktopTurns
+      .mockResolvedValueOnce({ turns: [oldRun] })
+      .mockResolvedValue({ turns: [newRun, oldRun] });
+    let dispose: (() => void) | undefined;
+    try {
+      dispose = recoverDaemonDesktopTurns();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mocks.watchDaemonDesktopTurn).toHaveBeenCalledTimes(1);
+      expect(mocks.watchDaemonDesktopTurn.mock.calls[0][0].runId).toBe("older");
+      await vi.advanceTimersByTimeAsync(5_100);
+      expect(mocks.watchDaemonDesktopTurn).toHaveBeenCalledTimes(2);
+      expect(mocks.watchDaemonDesktopTurn.mock.calls[1][0].runId).toBe("newer");
+      // An already completed run is read back once, not on every 5s poll.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(mocks.watchDaemonDesktopTurn).toHaveBeenCalledTimes(2);
+    } finally {
+      dispose?.();
+      vi.useRealTimers();
+    }
   });
 });

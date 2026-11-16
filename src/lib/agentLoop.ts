@@ -1999,7 +1999,7 @@ async function attachDaemonTurnToChat(
   link: ActiveDaemonDesktopTurn,
   controller: AbortController,
   observer = false,
-): Promise<void> {
+): Promise<boolean> {
   let latestContent = link.output || '⏳ Reconnecting to the resident runner…';
   let terminal = false;
   let activeRunId = link.runId;
@@ -2046,6 +2046,7 @@ async function attachDaemonTurnToChat(
     // its link for startup recovery in that case.
     if (terminal) removeActiveDaemonTurn(activeRunId);
   }
+  return terminal;
 }
 
 /**
@@ -2387,7 +2388,10 @@ async function runDaemonAgentTurn(
  * An observer disconnect never sends a cancellation request. */
 const recoveredObserverRuns = new Map<string, string>();
 
-function observeRecoveredDesktopTurn(link: ActiveDaemonDesktopTurn): void {
+function observeRecoveredDesktopTurn(
+  link: ActiveDaemonDesktopTurn,
+  onTerminal?: () => void,
+): void {
   if (turnControllers.has(link.sessionId)) return;
   if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) return;
   const controller = new AbortController();
@@ -2396,6 +2400,7 @@ function observeRecoveredDesktopTurn(link: ActiveDaemonDesktopTurn): void {
   useSessionStore.getState().markTurnRunning(link.sessionId, true);
   registerDurableController(link.runId, controller, link.sessionId);
   void attachDaemonTurnToChat(link, controller, true)
+    .then((terminal) => { if (terminal) onTerminal?.(); })
     .catch((error) => console.warn('Durable session observer disconnected:', error))
     .finally(() => {
       if (turnControllers.get(link.sessionId) === controller) {
@@ -2412,11 +2417,20 @@ function observeRecoveredDesktopTurn(link: ActiveDaemonDesktopTurn): void {
 /** Reattach from the daemon's authoritative ingress+run records, not only from
  * the old window's localStorage. This also works when a second desktop client
  * has never seen the first client's local cursor. Discovery does not execute. */
-export function recoverDaemonDesktopTurns(): void {
-  const cached = loadActiveDaemonTurns();
-  const authoritativeSessions = new Set<string>();
-  const attachCached = (awaitingAdmission: ReadonlySet<string> = new Set()) => {
-    for (const link of cached) {
+export function recoverDaemonDesktopTurns(): () => void {
+  // Per-recovery-lifetime terminal dedupe. Completed runs are discoverable
+  // after an app crash, but an open window must not rewatch one every poll.
+  const observedTerminals = new Set<string>();
+  let disposed = false;
+  let inFlight = false;
+  const attachCached = (
+    awaitingAdmission: ReadonlySet<string> = new Set(),
+    authoritativeSessions: ReadonlySet<string> = new Set(),
+  ) => {
+    // Always read the LIVE cache: it changes as observers finish, and a
+    // cached snapshot captured at mount would resurrect a removed old run.
+    for (const link of loadActiveDaemonTurns()) {
+      if (observedTerminals.has(link.runId)) continue;
       if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) {
         removeActiveDaemonTurn(link.runId);
         continue;
@@ -2429,13 +2443,13 @@ export function recoverDaemonDesktopTurns(): void {
   };
   if (!isTauri()) {
     attachCached();
-    return;
+    return () => { disposed = true; };
   }
 
   let retryDelayMs = 2_000;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const retry = () => {
-    if (retryTimer !== null) return;
+    if (disposed || retryTimer !== null) return;
     const delay = retryDelayMs;
     retryDelayMs = Math.min(30_000, retryDelayMs * 2);
     retryTimer = setTimeout(() => {
@@ -2444,7 +2458,13 @@ export function recoverDaemonDesktopTurns(): void {
     }, delay);
   };
   const discover = () => {
+    if (disposed || inFlight) return;
+    inFlight = true;
     void recoverableDesktopTurns().then(({ turns }) => {
+      if (disposed) return;
+      // Never preserve a last-discovery marker across poll cycles. Another
+      // client may have accepted a newer run in the same session.
+      const authoritativeSessions = new Set<string>();
       // A desktop may crash after accepting ingress but before flushing its
       // first transcript save. Recreate only a read-only display shell and
       // only in the primary window; never infer lost user instructions.
@@ -2472,7 +2492,8 @@ export function recoverDaemonDesktopTurns(): void {
       // editor and paired-device sessions distinct unless explicitly enrolled.
       for (const turn of latestRecoverableTurns(turns, sessionIds)) {
         const session = useSessionStore.getState().sessions.find((s) => s.id === turn.source_account_id);
-        if (!session || !turn.run_id || authoritativeSessions.has(session.id)) continue;
+        if (!session || !turn.run_id ||
+            authoritativeSessions.has(session.id) || observedTerminals.has(turn.run_id)) continue;
         if (turnControllers.has(session.id)) {
           // A cached observer may be watching an older run. Detach it, never
           // cancel it, then retry discovery to attach the new authoritative run.
@@ -2505,22 +2526,32 @@ export function recoverDaemonDesktopTurns(): void {
         };
         authoritativeSessions.add(session.id);
         saveActiveDaemonTurn(link);
-        observeRecoveredDesktopTurn(link);
+        observeRecoveredDesktopTurn(link, () => { observedTerminals.add(turn.run_id!); });
       }
-      attachCached(awaitingAdmission);
+      attachCached(awaitingAdmission, authoritativeSessions);
       // An accepted-but-not-queued turn is recovered by the daemon's existing
       // ingress replay. Poll only its state; never submit a second operation.
       if (awaitingAdmission.size > 0) retry();
       else retryDelayMs = 2_000;
     }).catch((error) => {
+      if (disposed) return;
       console.warn('Authoritative daemon session recovery unavailable:', error);
       attachCached();
       // A temporarily stopped daemon or unavailable sidecar must not make an
       // old cached cursor the only recovery opportunity until the next restart.
       retry();
-    });
+    }).finally(() => { inFlight = false; });
   };
+  // A second desktop window can admit another turn long after we started.
+  // Periodic discovery is read-only, bounded by the daemon page limit, and
+  // does not acquire an execution lease or resubmit any model operation.
+  const interval = setInterval(discover, 5_000);
   discover();
+  return () => {
+    disposed = true;
+    clearInterval(interval);
+    if (retryTimer !== null) clearTimeout(retryTimer);
+  };
 }
 
 /** When `artifactAutoPreview` (see `settingsStore.ts`) is on, opens the

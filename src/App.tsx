@@ -923,7 +923,8 @@ function App() {
   // read-only and the daemon alone owns execution, so a secondary session
   // window cannot start a duplicate tool merely by attaching to the ledger.
   useEffect(() => {
-    if (isTauri()) recoverDaemonDesktopTurns();
+    if (!isTauri()) return;
+    return recoverDaemonDesktopTurns();
   }, []);
 
   // Local App Builder (ROADMAP.md, Phase 3): a published app's static page
