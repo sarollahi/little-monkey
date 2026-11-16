@@ -191,6 +191,17 @@ fn is_the_cli(candidate: &Path) -> bool {
     if !candidate.is_file() {
         return false;
     }
+    // Failing an unknown --list flag alone does not identify the CLI: any
+    // unrelated executable (including a crashing harness) can fail that way.
+    // Clap's declared binary name is "monkey" in main.rs.
+    let Ok(version) = std::process::Command::new(candidate).arg("--version").output() else {
+        return false;
+    };
+    if !version.status.success()
+        || !String::from_utf8_lossy(&version.stdout).trim().starts_with("monkey ")
+    {
+        return false;
+    }
     let Ok(output) = std::process::Command::new(candidate).arg("--list").output() else {
         return false;
     };
