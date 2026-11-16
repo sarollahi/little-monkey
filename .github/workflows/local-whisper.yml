@@ -99,8 +99,10 @@ jobs:
           # runners; an absent cache is not proof of portable CPU flags.
           cargo clean --manifest-path src-tauri/Cargo.toml -p whisper-rs-sys --target ${{ matrix.target }}
 
-      - name: Compile Little Monkey with built-in Whisper
-        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --lib --target ${{ matrix.target }}
+      - name: Build and link Little Monkey with real built-in Whisper
+        # cargo check can stop before producing retained native object files;
+        # a release portability assertion must inspect actual linked bits.
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --lib --target ${{ matrix.target }}
       # Releases are built on these same runners. Left to its default, ggml
       # tunes whisper.cpp to the runner's CPU, and the installer then dies with
       # SIGILL on a user's machine without it (see .cargo/config.toml).
@@ -109,9 +111,20 @@ jobs:
         run: |
           set -euo pipefail
           target="src-tauri/target/${{ matrix.target }}"
-          mapfile -d '' caches < <(find "$target" -type f -path '*/whisper-rs-sys-*/out/build/CMakeCache.txt' -print0)
+          # The native CMake crate may put its cache under an alternate `out/`
+          # prefix. Search *actual generated files*, then retain only caches
+          # that declared GGML_NATIVE. Do not count unrelated CMake builds.
+          mapfile -d '' all_caches < <(find "$target" -type f -name CMakeCache.txt -print0)
+          caches=()
+          for cache in "${all_caches[@]}"; do
+            if grep -q '^GGML_NATIVE:' "$cache"; then
+              caches+=("$cache")
+            fi
+          done
           if [ "${#caches[@]}" -eq 0 ]; then
-            echo "::error::No actual whisper.cpp CMakeCache.txt after a forced rebuild; portable flags remain UNVERIFIED"
+            echo "::error::No GGML_NATIVE CMakeCache.txt found after a real native build"
+            echo "Generated CMake caches (unverified):" >&2
+            printf '%s\\n' "${all_caches[@]}" >&2
             exit 1
           fi
           for cache in "${caches[@]}"; do
