@@ -65,7 +65,7 @@ test("a missing payload file is a failure, not a skip", () => {
   const expected = expectedPayload("linux");
   const result = checkPayload(["usr/bin/little-monkey"], expected);
   assert.equal(result.outcome, OUTCOME.Fail);
-  assert.match(result.reason, /usr\/lib\/little-monkey\/monkey/);
+  assert.match(result.reason, /usr\\/bin\\/monkey-cli/);
 
   assert.equal(checkPayload(expected, expected).outcome, OUTCOME.Pass);
 });
