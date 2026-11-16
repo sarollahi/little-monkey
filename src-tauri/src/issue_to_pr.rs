@@ -143,6 +143,8 @@ pub struct IssueToPrRun {
     /// Fences overlapping check processes and cancellation across restarts.
     #[serde(default)]
     pub verification_generation: u64,
+    #[serde(default)]
+    pub verification_in_progress: bool,
     /// Independent reviewer evidence tied to the exact tested owned diff.
     #[serde(default)]
     pub review_evidence: Option<ReviewEvidence>,
@@ -524,6 +526,7 @@ pub async fn issue_to_pr_start(
         pr_url: None,
         checks: Vec::new(),
         verification_generation: 0,
+        verification_in_progress: false,
         review_evidence: None,
         ci_history: Vec::new(),
         ci_head_oid: None,
@@ -681,7 +684,7 @@ pub fn issue_to_pr_advance(
         }
     }
     if run.status == "checking" && status == "opening_pr" {
-        if run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0)) {
+        if run.verification_in_progress || run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0)) {
             return Err("Cannot authorize PR delivery without successful repository checks".to_string());
         }
         let evidence = run.review_evidence.as_ref()
@@ -712,7 +715,9 @@ pub fn issue_to_pr_advance(
 }
 
 fn is_current_verification(run: &IssueToPrRun, expected_generation: u64) -> bool {
-    run.status == "checking" && run.verification_generation == expected_generation
+    run.status == "checking"
+        && run.verification_in_progress
+        && run.verification_generation == expected_generation
 }
 
 /// Detects and runs the owned worktree's own `test`/`build` scripts (see
@@ -743,6 +748,8 @@ pub async fn issue_to_pr_run_checks(
     run.verification_generation = run.verification_generation.checked_add(1)
         .ok_or_else(|| "Verification generation exhausted".to_string())?;
     run.review_evidence = None;
+    run.checks.clear();
+    run.verification_in_progress = true;
     let generation = run.verification_generation;
     run.updated_at_ms = now_ms()?;
     runs.insert(run.run_id.clone(), run.clone());
@@ -820,6 +827,7 @@ pub async fn issue_to_pr_run_checks(
         return Err("Stale verification completion ignored: run cancelled, moved on, or superseded".to_string());
     }
     run.checks = outcomes;
+    run.verification_in_progress = false;
     run.review_evidence = None; // New verification invalidates any prior diff review.
     run.status = if all_passed {
         // Do not expose Git delivery before the independent diff review finishes.
@@ -872,7 +880,7 @@ pub fn issue_to_pr_record_review(
     let path = runs_path()?;
     let mut runs = load_runs_from(&path);
     let mut run = require_run(&runs, &run_id)?;
-    if run.status != "checking" || run.checks.is_empty()
+    if run.status != "checking" || run.verification_in_progress || run.checks.is_empty()
         || !run.checks.iter().all(|check| check.passed && check.code == Some(0))
     {
         return Err("An independent review requires successful authoritative local checks".to_string());
@@ -1352,6 +1360,7 @@ mod tests {
             pr_url: None,
             checks: Vec::new(),
             verification_generation: 0,
+            verification_in_progress: false,
             review_evidence: None,
             ci_history: Vec::new(),
             ci_head_oid: None,
@@ -1598,6 +1607,7 @@ mod tests {
     fn verification_generation_survives_restart_and_fences_outdated_checks() {
         let mut run = fixture_run("owner/repo", 42, 1, "checking");
         run.verification_generation = 2;
+        run.verification_in_progress = true;
         let recovered: IssueToPrRun = serde_json::from_str(
             &serde_json::to_string(&run).unwrap()
         ).unwrap();
@@ -1608,6 +1618,10 @@ mod tests {
         let mut superseded = recovered;
         superseded.verification_generation += 1;
         assert!(!is_current_verification(&superseded, 2), "older subprocess may not publish results");
+        let mut completed = superseded;
+        completed.verification_in_progress = false;
+        assert!(!is_current_verification(&completed, completed.verification_generation),
+            "a finished verifier must not reuse old evidence");
     }
 
     #[test]
