@@ -83,7 +83,13 @@ state, and calls the independent verification oracle against the original
 commit. It preserves the real stdout/stderr from every CLI command, the
 post-run Git patch, result JSON, attempts and the measured task wall time.
 If the run errors or times out, it requests cancellation of only its own
-run and records the failure. Other timings remain null until measured.
+run and records the failure. A real `model_delta` event with nonempty text also allows
+**first-token latency** to be measured from its persisted event timestamp
+minus the persisted `started` timestamp. This is an *event-based daemon
+metric*, not a claimed UI-render or network TTFT. When no such event exists,
+first-token latency remains `null`; no timing is inferred from simulated
+fixtures. Startup, idle memory and cancellation-cleanup metrics remain null
+until separately measured.
 
 This is a **real-model** workflow, never used in default hosted CI. It can
 also be launched with the manually triggered
