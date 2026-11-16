@@ -116,7 +116,11 @@ export interface RunHeadlessAgentParams {
   validateFinal?: (summary: string) => void | Promise<void>;
 }
 
-function workspaceRootViolation(toolCall: ToolCall, requiredRoot: string | undefined): string | null {
+function workspaceRootViolation(
+  toolCall: ToolCall,
+  requiredRoot: string | undefined,
+  executionSource?: string,
+): string | null {
   if (!requiredRoot) return null;
   let args: Record<string, unknown>;
   try {
@@ -138,6 +142,18 @@ function workspaceRootViolation(toolCall: ToolCall, requiredRoot: string | undef
   const normalizedRoot = requiredRoot.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
   if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`)) {
     return `Tool "${toolCall.function.name}" may only target attached root "${requiredRoot}".`;
+  }
+  if (executionSource === 'issue-to-pr') {
+    const relative = normalizedPath.slice(normalizedRoot.length).replace(/^\//, '');
+    const components = relative.split('/').filter((part) => part !== '' && part !== '.');
+    if (components.includes('..')) return 'Issue tool paths may not traverse parent directories.';
+    if (toolCall.function.name === 'write_file' || toolCall.function.name === 'edit_file') {
+      const lower = components.map((part) => part.toLowerCase());
+      if (lower.includes('.git')
+          || (lower[0] === '.github' && (lower[1] === 'workflows' || lower[1] === 'actions'))) {
+        return 'Issue agents cannot modify Git metadata or GitHub Actions definitions without a separate human-controlled workflow.';
+      }
+    }
   }
   return null;
 }
@@ -258,7 +274,7 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
         const aborted = signal.aborted;
         const offered = isToolCallAllowed(toolCall, tools);
         const rootViolation = offered
-          ? workspaceRootViolation(toolCall, params.requiredWorkspaceRoot)
+          ? workspaceRootViolation(toolCall, params.requiredWorkspaceRoot, params.executionSource)
           : null;
         const allowed = offered && !rootViolation;
         if (!aborted) {
