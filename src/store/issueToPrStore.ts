@@ -5,7 +5,7 @@ import type { IssueToPrRun } from "../lib/issueToPr";
 import { isTerminalIssueToPrStatus } from "../lib/issueToPr";
 import * as issueToPrRunner from "../lib/issueToPrRunner";
 import { errorMessage } from "../lib/errors";
-import { githubReviewThreads, githubFailureLogs } from "../lib/gitDelivery";
+import { githubReviewThreads, githubFailureLogs, inspectOwnedWorktree } from "../lib/gitDelivery";
 
 function errorText(error: unknown): string {
   return errorMessage(error);
@@ -331,11 +331,45 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       })();
       return;
     }
-    // "planning" or "implementing": re-run the headless agent turn against
-    // the same owned worktree. Any files it already wrote are still on disk,
-    // so the agent picks up from there instead of losing progress; the self-
-    // transition `implementing` -> `implementing` this triggers is a legal
-    // no-op on the Rust side (see `issue_to_pr.rs`'s `valid_transition`).
+    if (run.status === "implementing") {
+      // A crash may have happened AFTER mutations but BEFORE the model
+      // returned. Replaying that uncommitted coding turn risks duplicated or
+      // contradictory edits. Fence this recovery while inspecting the
+      // authoritative owned worktree, then reverify the actual diff instead.
+      const controller = new AbortController();
+      controllers.set(run.runId, controller);
+      void (async () => {
+        let next: IssueToPrRun | null = null;
+        try {
+          const latest = await api.getIssueToPrStatus(run.runId);
+          if (latest.status !== "implementing" || controller.signal.aborted) return;
+          const inspection = await inspectOwnedWorktree(latest.worktreeId);
+          if (controller.signal.aborted) return;
+          if (inspection.worktree.marker.branch !== latest.branch
+              || inspection.worktree.marker.repositorySlug !== latest.repositorySlug) {
+            throw new Error("Owned worktree identity changed during restart recovery.");
+          }
+          if (inspection.files.some((file) => !file.ignored)) {
+            next = await api.advanceIssueToPr(latest.runId, "checking");
+            onProgress(next);
+          } else {
+            next = latest; // No observed mutation; an agent restart is safe.
+          }
+        } catch (error) {
+          await api.advanceIssueToPr(run.runId, "failed", {
+            error: "Could not safely recover interrupted issue implementation: " + errorText(error),
+          }).catch(() => {});
+        } finally {
+          controllers.delete(run.runId);
+          if (!controller.signal.aborted && next) {
+            if (next.status === "checking") resumeOrphanedRun(next);
+            else if (next.status === "implementing") void driveRun(next);
+          }
+        }
+      })();
+      return;
+    }
+    // Planning has not initiated a model mutation; start the existing driver.
     void driveRun(run);
   };
 
