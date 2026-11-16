@@ -148,6 +148,17 @@ jobs:
       - name: Frontend tests
         run: pnpm test
 
+      - name: Durable session frontend acceptance and evidence
+        run: pnpm test:durable-sessions --frontend-only
+
+      - name: Upload durable session frontend acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: durable-sessions-frontend
+          path: test-results/durable-session-acceptance.json
+          if-no-files-found: ignore
+
       - name: i18n key-lint and locale key-set sync
         # Two gates, not one. `keyLint` fails on a key used but absent from the
         # base; `localeSync` fails when a locale's key set, placeholders, or
@@ -421,6 +432,9 @@ jobs:
             # invalidating the session DBus connection for both tests.
             # Run every test (not a skip) serially against this real daemon.
             RUST_TEST_THREADS=1 pnpm test:rust
+            # Focused, machine-readable recovery evidence: use the same real
+            # Secret Service and cgroup context as the broad Rust suite.
+            RUST_TEST_THREADS=1 pnpm test:durable-sessions --rust-only
             # Three ACTUAL independently running daemon installations over
             # signed/pinned TLS on loopback, private SQLite and OS keychain.
             # This test owns only disposable GitHub-hosted runner state.
@@ -438,6 +452,18 @@ jobs:
       - name: Rust tests
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
         run: pnpm test:rust
+
+      - name: Durable session Rust acceptance (macOS and Windows)
+        if: ${{ !startsWith(matrix.os, 'ubuntu') }}
+        run: pnpm test:durable-sessions --rust-only
+
+      - name: Upload durable session Rust acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: durable-sessions-rust-${{ matrix.os }}
+          path: test-results/durable-session-acceptance.json
+          if-no-files-found: ignore
 
       - name: Paired peer live TLS loopback E2E
         if: startsWith(matrix.os, 'ubuntu')

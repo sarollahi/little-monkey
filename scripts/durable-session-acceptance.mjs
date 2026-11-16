@@ -50,6 +50,7 @@ const rustCases = [
   "durable_session_lookup_upgrades_a_v20_queue_in_place",
   "recovery_read_model_includes_only_live_desktop_and_reconciliation",
   "recovery_ignores_terminal_jobs_but_preserves_reconciliation",
+  "long_running_job_finished_recently_is_recovered_even_if_admission_is_old",
   "session_scoped_attachment_filters_before_limiting",
   "paired_session_attachment_respects_both_capability_and_run_scope",
   "recovery_never_replays_a_confirmed_mutation",

@@ -205,3 +205,15 @@ last recorded state change, **not** initial ingress admission. A turn submitted
 more than a week ago but completed during a lengthy background workflow remains
 discoverable if its completion was recent. The query orders those terminal runs
 by job update time and prioritizes active/reconciliation work.
+
+## CI acceptance evidence
+
+The normal pull-request workflow executes `pnpm test:durable-sessions
+--frontend-only` after its broad frontend tests and runs
+`pnpm test:durable-sessions --rust-only` after the Rust tests on Linux,
+Windows and macOS. Linux runs its focused recovery cases inside the same
+delegated cgroup and DBus Secret Service as the broad suite. Each platform
+uploads its exact `test-results/durable-session-acceptance.json` evidence
+as a GitHub Actions artifact. The uploader tolerates an absent report after
+an earlier gate failure, but those earlier gates still fail the job; no
+missing evidence can turn a red build green.
