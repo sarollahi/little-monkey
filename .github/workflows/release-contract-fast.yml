@@ -54,6 +54,7 @@ jobs:
             scripts/first-run-acceptance.contract.test.mjs \
             scripts/first-run-live-e2e.contract.test.mjs \
             scripts/lib/installSmoke.test.mjs \
+            scripts/lib/firstRunEventMetrics.test.mjs \
             scripts/release-asset-integrity.test.mjs \
             scripts/release-workflow-policy.contract.test.mjs
 
