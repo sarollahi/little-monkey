@@ -155,10 +155,30 @@ jobs:
           echo "PREVIOUS_VERSION=$PREVIOUS_VERSION" >> "$GITHUB_ENV"
           mkdir -p previous
           gh release download "$PREVIOUS_VERSION" --dir previous --pattern '*amd64.deb'
+          gh release download "$PREVIOUS_VERSION" --dir previous --pattern '*amd64.deb.asc'
+          gh release download "$PREVIOUS_VERSION" --dir previous --pattern 'little-monkey-release-key.asc'
           gh api "repos/${{ github.repository }}/releases/tags/$PREVIOUS_VERSION" > evidence/previous-release-metadata.json
           node scripts/release-asset-integrity.mjs \
             --metadata evidence/previous-release-metadata.json \
             --artifacts previous | tee evidence/previous-digest-check.txt
+
+          # Verify actual release detached GPG signature, not just presence of
+          # a .asc filename. The key is downloaded alongside the release, so
+          # this authenticates INTERNAL release consistency, NOT an independently
+          # pinned publisher identity. The latter remains manual acceptance.
+          previous_deb="$(find previous -maxdepth 1 -name '*amd64.deb' -type f -print -quit)"
+          test -n "$previous_deb"
+          test -f "$previous_deb.asc"
+          test -s previous/little-monkey-release-key.asc
+          keyring="$RUNNER_TEMP/previous-release-public-keys"
+          mkdir -m 700 "$keyring"
+          gpg --batch --homedir "$keyring" --import previous/little-monkey-release-key.asc \
+            > evidence/previous-gpg-import.txt 2>&1
+          gpg --batch --homedir "$keyring" --verify "$previous_deb.asc" "$previous_deb" \
+            > evidence/previous-gpg-verify.txt 2>&1
+          grep -E 'Good signature|gpg: Signature made' evidence/previous-gpg-verify.txt
+          echo "VERIFIED: detached GPG signature valid with release-supplied key; independent publisher fingerprint NOT VERIFIED" \
+            > evidence/previous-gpg-verdict.txt
 
       - name: Actually install previous published version through apt
         shell: bash
