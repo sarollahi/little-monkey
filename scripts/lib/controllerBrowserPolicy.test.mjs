@@ -202,6 +202,7 @@ class Chrome {
       ],
       { stdio: ["ignore", "ignore", "pipe"] },
     );
+    try {
     const endpoint = await new Promise((resolve, reject) => {
       let stderr = "";
       const timer = setTimeout(
@@ -224,12 +225,24 @@ class Chrome {
     });
     const socket = new WebSocket(endpoint);
     await new Promise((resolve, reject) => {
-      socket.addEventListener("open", resolve, { once: true });
-      socket.addEventListener("error", () => reject(new Error("could not attach to the browser")), {
-        once: true,
-      });
+      const timer = setTimeout(
+        () => reject(new Error("timed out attaching to Chrome's DevTools socket")),
+        LAUNCH_TIMEOUT_MS,
+      );
+      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+      socket.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("could not attach to the browser"));
+      }, { once: true });
     });
     return new Chrome(child, socket, profile);
+    } catch (error) {
+      // A launch/attachment failure happened before the caller received a
+      // Chrome handle. Clean up here or Chromium keeps the CI process alive.
+      child.kill("SIGKILL");
+      rmSync(profile, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   constructor(child, socket, profile) {
