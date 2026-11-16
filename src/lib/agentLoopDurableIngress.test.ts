@@ -319,6 +319,41 @@ describe("every desktop send is a durable ingress turn", () => {
 });
 
 describe("long-lived cross-window daemon observation", () => {
+  it("unmount detaches its observers but never cancels daemon execution", async () => {
+    vi.useFakeTimers();
+    mocks.recoverableDesktopTurns.mockResolvedValue({
+      turns: [{
+        ingress_id: "ing-live", source: "desktop",
+        source_account_id: "s-1", source_event_id: "turn-live",
+        state: "queued", created_at_ms: 10, run_id: "run-live",
+        job_id: "job-live", run_state: "running", execution_version: 1,
+      }],
+    });
+    mocks.watchDaemonDesktopTurn.mockImplementation((_link: unknown, signal: AbortSignal) =>
+      new Promise(resolve => {
+        signal.addEventListener("abort", () => resolve({
+          output: "", status: "detached", terminal: false,
+          terminalStatus: null, lastSequence: 0,
+        }), { once: true });
+      }));
+    let dispose: (() => void) | undefined;
+    try {
+      dispose = recoverDaemonDesktopTurns();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mocks.watchDaemonDesktopTurn).toHaveBeenCalledTimes(1);
+      const signal = mocks.watchDaemonDesktopTurn.mock.calls[0][1] as AbortSignal;
+      expect(signal.aborted).toBe(false);
+      expect(mocks.watchDaemonDesktopTurn.mock.calls[0][3]).toBe(false);
+      dispose();
+      expect(signal.aborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(mocks.watchDaemonDesktopTurn).toHaveBeenCalledTimes(1);
+    } finally {
+      dispose?.();
+      vi.useRealTimers();
+    }
+  });
+
   it("discovers a newer run after the previous run was already observed as terminal", async () => {
     vi.useFakeTimers();
     const sample = (run: string, created: number) => ({

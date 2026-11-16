@@ -2391,9 +2391,10 @@ const recoveredObserverRuns = new Map<string, string>();
 function observeRecoveredDesktopTurn(
   link: ActiveDaemonDesktopTurn,
   onTerminal?: () => void,
-): void {
-  if (turnControllers.has(link.sessionId)) return;
-  if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) return;
+  onSettled?: () => void,
+): AbortController | null {
+  if (turnControllers.has(link.sessionId)) return null;
+  if (!useSessionStore.getState().sessions.some((session) => session.id === link.sessionId)) return null;
   const controller = new AbortController();
   turnControllers.set(link.sessionId, controller);
   recoveredObserverRuns.set(link.sessionId, link.runId);
@@ -2411,7 +2412,9 @@ function observeRecoveredDesktopTurn(
       cancellationDisposers.get(controller)?.forEach((dispose) => dispose());
       cancellationDisposers.delete(controller);
       externallyRequestedCancellations.delete(link.runId);
+      onSettled?.();
     });
+  return controller;
 }
 
 /** Reattach from the daemon's authoritative ingress+run records, not only from
@@ -2421,6 +2424,14 @@ export function recoverDaemonDesktopTurns(): () => void {
   // Per-recovery-lifetime terminal dedupe. Completed runs are discoverable
   // after an app crash, but an open window must not rewatch one every poll.
   const observedTerminals = new Set<string>();
+  const ownedObservers = new Set<AbortController>();
+  const observe = (link: ActiveDaemonDesktopTurn, onTerminal?: () => void) => {
+    let controller: AbortController | null = null;
+    controller = observeRecoveredDesktopTurn(link, onTerminal, () => {
+      if (controller) ownedObservers.delete(controller);
+    });
+    if (controller) ownedObservers.add(controller);
+  };
   let disposed = false;
   let inFlight = false;
   const attachCached = (
@@ -2438,7 +2449,7 @@ export function recoverDaemonDesktopTurns(): () => void {
       if (authoritativeSessions.has(link.sessionId) || awaitingAdmission.has(link.sessionId)) continue;
       // An older cached link must not obscure a newer accepted run from
       // the authoritative store. The cache is only a safe fallback.
-      observeRecoveredDesktopTurn(link);
+      observe(link);
     }
   };
   if (!isTauri()) {
@@ -2526,7 +2537,7 @@ export function recoverDaemonDesktopTurns(): () => void {
         };
         authoritativeSessions.add(session.id);
         saveActiveDaemonTurn(link);
-        observeRecoveredDesktopTurn(link, () => { observedTerminals.add(turn.run_id!); });
+        observe(link, () => { observedTerminals.add(turn.run_id!); });
       }
       attachCached(awaitingAdmission, authoritativeSessions);
       // An accepted-but-not-queued turn is recovered by the daemon's existing
@@ -2551,6 +2562,10 @@ export function recoverDaemonDesktopTurns(): () => void {
     disposed = true;
     clearInterval(interval);
     if (retryTimer !== null) clearTimeout(retryTimer);
+    // App/window unmount detaches these local observers; the daemon worker
+    // is still running and may be watched after a fresh mount.
+    for (const observer of ownedObservers) observer.abort();
+    ownedObservers.clear();
   };
 }
 
