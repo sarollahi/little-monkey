@@ -88,8 +88,12 @@ Configured repository `test`, `lint`, `typecheck`, and `build` scripts
 run through the existing verification command runner, with an inspected
 worktree fingerprint before and after verification. **No test scripts is
 not a pass**. The coordinator requires independent, non-mutating diff review
-with complete file coverage before the app enables Git delivery. Results,
-failed checks, review evidence, and the durable task link remain inspectable
+with complete file coverage before the app enables Git delivery. For
+surviving changed files, coverage requires an actual successful `read_file`
+result from the read-only reviewer, not just the model's own
+`filesReviewed` claim. Deleted files remain reviewable from the diff.
+Missing tool evidence, truncated or oversized diffs, and changed revisions
+fail closed. Results, failed checks, review evidence, and the durable task link remain inspectable
 from the issue panel/run ledger.
 
 Git delivery is deliberately not autonomous: the issue coordinator
@@ -127,6 +131,10 @@ reviewed-diff fingerprint plus covered files. The preview refuses a stale
 review fingerprint. A client cannot self-report `ready`; only GitHub
 observations of the matching owned draft PR head can establish readiness. Persisted attempts and CI evidence survive
 desktop restarts; a repair started before a crash is not counted twice.
+Verification processes are fenced by a persisted generation counter so
+cancelled or superseded checks cannot overwrite a newer state. PR identity
+is checked against live GitHub draft status, origin ownership, canonical
+URL, frozen base and exact owned branch SHA before CI monitoring begins.
 
 The timeline ends at **Ready**, which is a human publication boundary.
 There is no automatic merge, force-push, PR ready-for-review mutation, or
