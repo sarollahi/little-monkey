@@ -434,6 +434,11 @@ jobs:
             # Channel-agent E2E tests spawn the real CLI. Build it first;
             # cargo test alone produces a test harness, not the CLI executable.
             cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
+            # Preserve the REAL executable through tauri-build's next
+            # externalBin copy; an empty bootstrap placeholder could
+            # otherwise replace the already-linked CLI during cargo test.
+            node scripts/ensure-cli-sidecar-placeholder.mjs
+            src-tauri/target/debug/monkey-cli --version
             RUST_TEST_THREADS=1 pnpm test:rust
             # Three ACTUAL independently running daemon installations over
             # signed/pinned TLS on loopback, private SQLite and OS keychain.
@@ -451,7 +456,15 @@ jobs:
 
       - name: Build executable for cross-platform daemon E2E
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
-        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
+        shell: bash
+        run: |
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
+          node scripts/ensure-cli-sidecar-placeholder.mjs
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            src-tauri/target/debug/monkey-cli.exe --version
+          else
+            src-tauri/target/debug/monkey-cli --version
+          fi
 
       - name: Rust tests
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
