@@ -114,7 +114,12 @@ jobs:
           # The native CMake crate may put its cache under an alternate `out/`
           # prefix. Search *actual generated files*, then retain only caches
           # that declared GGML_NATIVE. Do not count unrelated CMake builds.
-          mapfile -d '' all_caches < <(find "$target" -type f -name CMakeCache.txt -print0)
+          # macOS GitHub runners use Bash 3.2, which has no mapfile.
+          # NUL-delimited read preserves spaces without relying on newer Bash.
+          all_caches=()
+          while IFS= read -r -d '' found_cache; do
+            all_caches+=("$found_cache")
+          done < <(find "$target" -type f -name CMakeCache.txt -print0)
           caches=()
           for cache in "${all_caches[@]}"; do
             if grep -q '^GGML_NATIVE:' "$cache"; then
