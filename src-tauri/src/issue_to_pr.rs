@@ -682,6 +682,10 @@ pub fn issue_to_pr_advance(
     Ok(run)
 }
 
+fn is_current_verification(run: &IssueToPrRun, expected_generation: u64) -> bool {
+    run.status == "checking" && run.verification_generation == expected_generation
+}
+
 /// Detects and runs the owned worktree's own `test`/`build` scripts (see
 /// `detect_check_commands`) via the exact same `AppHandle`-free execution
 /// core `verify.rs` uses for its own post-edit checks — deliberately not
@@ -781,7 +785,7 @@ pub async fn issue_to_pr_run_checks(
 
     let mut runs = load_runs_from(&path);
     let mut run = require_run(&runs, &run_id)?;
-    if run.status != "checking" || run.verification_generation != generation {
+    if !is_current_verification(&run, generation) {
         // Cancellation or a newer verifier took ownership during the
         // subprocess. Preserve their authoritative state and evidence.
         return Err("Stale verification completion ignored: run cancelled, moved on, or superseded".to_string());
@@ -1568,14 +1572,13 @@ mod tests {
         let recovered: IssueToPrRun = serde_json::from_str(
             &serde_json::to_string(&run).unwrap()
         ).unwrap();
-        assert_eq!(recovered.verification_generation, 2);
-        assert_eq!(recovered.status, "checking");
+        assert!(is_current_verification(&recovered, 2));
         let mut cancelled = recovered.clone();
         cancelled.status = "cancelled".to_string();
-        assert!(cancelled.status != "checking" || cancelled.verification_generation != 2);
+        assert!(!is_current_verification(&cancelled, 2), "cancelled run must not be revived");
         let mut superseded = recovered;
         superseded.verification_generation += 1;
-        assert!(superseded.verification_generation != 2);
+        assert!(!is_current_verification(&superseded, 2), "older subprocess may not publish results");
     }
 
     #[test]
