@@ -140,3 +140,17 @@ jobs:
           path: security-mcp3-probe/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Fail if MCP v3 real compile or integration migration is incomplete
+        shell: bash
+        run: |
+          set -euo pipefail
+          for stage in resolve compile integration; do
+            result="security-mcp3-probe/$stage.exit"
+            if [ ! -f "$result" ] || [ "$(cat "$result")" != "0" ]; then
+              echo "::error::MCP v3 $stage is NOT VERIFIED. Read the uploaded compiler evidence."
+              exit 1
+            fi
+          done
+          echo "MCP v3 resolved, compiled and passed real HTTP/stdio integration tests" \
+            >> "$GITHUB_STEP_SUMMARY"
