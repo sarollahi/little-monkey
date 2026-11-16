@@ -66,6 +66,24 @@ jobs:
             fi
           fi
 
+      - name: Enforce production updater and Linux installer signing credentials
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Key presence is a prerequisite, not proof of a matching key or
+          # artifact signature; the bundler and GPG must still sign and verify.
+          for key in TAURI_SIGNING_PRIVATE_KEY GPG_PRIVATE_KEY GPG_PASSPHRASE; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::$key is absent; refuse an unsigned release"
+              exit 1
+            fi
+          done
+          echo "Required signing credentials are configured (their validity is checked during signing)."
+
       - name: Block publication on current Rust security advisories
         shell: bash
         run: |
@@ -266,12 +284,11 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
-          # Same contract as the updater secrets above: no key configured means
-          # the release still ships, just unsigned. The `secrets` context is not
-          # readable from a step-level `if`, so the guard lives here.
-          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "GPG_PRIVATE_KEY unset — skipping installer signatures"
-            exit 0
+          # Production releases must never omit Linux installer signatures.
+          # A missing secret is fatal even if another platform signed its assets.
+          if [ -z "${GPG_PRIVATE_KEY:-}" ] || [ -z "${GPG_PASSPHRASE:-}" ]; then
+            echo "::error::Missing Linux installer signing credentials"
+            exit 1
           fi
           # `gpg --import` exits 2 when it logs any error at all, including a
           # malformed armor header line, even when the key itself imported —
