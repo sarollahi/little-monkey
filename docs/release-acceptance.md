@@ -37,6 +37,21 @@ queued, failed, or cancelled, preflight fails closed. Required security,
 installer, hardware, signing, and human acceptance checks are additional
 gates and are not waived by this check.
 
+## Release signer continuity
+
+The Linux signer fingerprint stored in
+[`scripts/release-trust-pins.json`](../scripts/release-trust-pins.json) was
+observed and cryptographically validated against the actual published
+v1.12.0 Debian detached signature. The candidate upgrade runner now compares
+the downloaded previous release's public key to this pinned fingerprint
+*before* accepting its signature; the production Linux signing job refuses
+to sign with any different private key. A deliberate rotation requires a
+separately reviewed change to the pin.
+
+This binds releases to an **existing signing-key lineage**. It does *not*
+provide independently verified personal or organizational ownership of
+that key, nor does it replace an OS code-signature or provenance check.
+
 ## macOS trust verification
 
 The production release now fails early if Apple Developer ID certificate,

@@ -56,6 +56,9 @@ jobs:
             scripts/release-manifest-gate.mjs
             scripts/release-ci-source-gate.mjs
             scripts/release-ci-source-gate.test.mjs
+            scripts/release-trust-pins.json
+            scripts/release-trust-pins.test.mjs \
+            scripts/release-trust-pins.test.mjs
             scripts/release-manifest-gate.test.mjs \
             scripts/release-ci-source-gate.test.mjs
             examples/first-run/normalize.mjs

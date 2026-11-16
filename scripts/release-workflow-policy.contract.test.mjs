@@ -35,5 +35,7 @@ test("publication is downstream of installer smoke and guarded preflight", () =>
   assert.match(workflow, /codesign --verify --deep --strict/);
   assert.match(workflow, /spctl --assess --type execute/);
   assert.match(workflow, /Missing Linux installer signing credentials/);
+  assert.match(workflow, /linux_gpg_fingerprint/);
+  assert.match(workflow, /Unexpected Linux release signer fingerprint/);
   assert.doesNotMatch(workflow, /skipping installer signatures/i);
 });

@@ -353,9 +353,14 @@ jobs:
           # this step needs answered, so ask the keyring instead: an empty
           # KEY_ID is the real failure and stays fatal.
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import || true
-          KEY_ID="$({ gpg --list-secret-keys --with-colons || true; } | awk -F: '/^sec:/ {print $5; exit}')"
-          if [ -z "$KEY_ID" ]; then
-            echo "GPG_PRIVATE_KEY is set but no secret key was imported — refusing to ship unsigned installers"
+          # Pin the exact public release signer established by v1.12.0.
+          # The key UID alone is not identity authentication; a rotated key
+          # requires a separately reviewed pin update rather than silent use.
+          KEY_ID="$({ gpg --batch --list-secret-keys --with-colons --fingerprint || true; } \
+            | awk -F: '/^fpr:/ {print $10; exit}')"
+          EXPECTED_KEY_ID="$(node -p "require('./scripts/release-trust-pins.json').linux_gpg_fingerprint")"
+          if [ -z "$KEY_ID" ] || [ "$KEY_ID" != "$EXPECTED_KEY_ID" ]; then
+            echo "::error::Unexpected Linux release signer fingerprint; refuse an unsigned or key-swapped release"
             exit 1
           fi
           BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"

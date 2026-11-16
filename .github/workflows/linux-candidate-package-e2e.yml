@@ -174,10 +174,18 @@ jobs:
           mkdir -m 700 "$keyring"
           gpg --batch --homedir "$keyring" --import previous/little-monkey-release-key.asc \
             > evidence/previous-gpg-import.txt 2>&1
+          gpg --batch --homedir "$keyring" --with-colons --fingerprint \
+            > evidence/previous-gpg-fingerprint.txt
+          actual_fingerprint="$(awk -F: '$1=="fpr" {print $10; exit}' evidence/previous-gpg-fingerprint.txt)"
+          expected_fingerprint="$(node -p "require('./scripts/release-trust-pins.json').linux_gpg_fingerprint")"
+          if [ "$actual_fingerprint" != "$expected_fingerprint" ]; then
+            echo "::error::Previous release's GPG key differs from pinned publisher-continuity fingerprint"
+            exit 1
+          fi
           gpg --batch --homedir "$keyring" --verify "$previous_deb.asc" "$previous_deb" \
             > evidence/previous-gpg-verify.txt 2>&1
           grep -E 'Good signature|gpg: Signature made' evidence/previous-gpg-verify.txt
-          echo "VERIFIED: detached GPG signature valid with release-supplied key; independent publisher fingerprint NOT VERIFIED" \
+          echo "VERIFIED: detached GPG signature matches pinned v1.12.0 release key; independent publisher identity NOT VERIFIED" \
             > evidence/previous-gpg-verdict.txt
 
       - name: Actually install previous published version through apt
