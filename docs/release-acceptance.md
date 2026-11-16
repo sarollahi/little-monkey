@@ -49,7 +49,10 @@ app-signed updater artifact.
   and SHA-256-checks the newest published *older* x64 Debian installer,
   installs that version through `apt`, upgrades through the same package
   manager to the candidate, and downgrades through `apt` as a rollback
-  exercise. A canary validates basic file retention, **not** app-database
+  exercise. The actual packaged CLI is installed at `/usr/bin/monkey-cli`,
+  as verified from the failed prior candidate's real `.deb` file manifest;
+  the smoke tests now execute that binary instead of assuming a `monkey`
+  filename. A canary validates basic file retention, **not** app-database
   migration. This does not exercise the signed in-app updater's rollback
   script or a graphical first run, and it does not publish to GitHub Releases.
 - [Real-model first-run](../.github/workflows/first-run-live-e2e.yml) is
