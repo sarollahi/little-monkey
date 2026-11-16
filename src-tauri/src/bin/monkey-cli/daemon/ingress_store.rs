@@ -389,9 +389,9 @@ impl DaemonStore {
                    ('preparing','queued','running','waiting_approval','paused',
                     'cancelling','needs_reconciliation')
                  ) OR (
-                   created_at_ms >= ?2 AND job_id IN (
+                   job_id IN (
                      SELECT job_id FROM daemon_jobs WHERE state IN
-                     ('succeeded','failed','cancelled')
+                     ('succeeded','failed','cancelled') AND updated_at_ms >= ?2
                    )
                  )
                ))
@@ -402,7 +402,9 @@ impl DaemonStore {
                  ('preparing','queued','running','waiting_approval','paused',
                   'cancelling','needs_reconciliation')
                ) THEN 0 ELSE 1 END,
-               created_at_ms DESC, ingress_id DESC LIMIT ?1"
+               COALESCE((SELECT updated_at_ms FROM daemon_jobs
+                         WHERE job_id=ingress_turns.job_id), created_at_ms) DESC,
+               ingress_id DESC LIMIT ?1"
         )).map_err(|error| error.to_string())?;
         let rows = statement.query_map(
             rusqlite::params![i64::from(limit.clamp(1, 2000)), terminal_since_ms],
@@ -809,6 +811,40 @@ mod tests {
         let recovered=store.recoverable_desktop_turns_since(10, NOW + 1).unwrap();
         assert_eq!(recovered.len(),1);
         assert_eq!(recovered[0].source_event_id,"terminal");
+    }
+
+    #[test]
+    fn long_running_job_finished_recently_is_recovered_even_if_admission_is_old() {
+        let mut store = DaemonStore::open_in_memory().unwrap();
+        const EIGHT_DAYS: i64 = 8 * 24 * 60 * 60 * 1_000;
+        const SEVEN_DAYS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        let old = ConversationIngress::direct(
+            ConversationSource::Desktop, "acct-1", "long-running",
+            "session-1", "ship it", RouteTarget::new("chat"),
+            NOW - EIGHT_DAYS,
+        );
+        let IngressAcceptance::Accepted { ingress_id } = store
+            .accept_ingress_turn(&old, &[], NOW - EIGHT_DAYS).unwrap()
+        else { panic!("expected a newly accepted turn"); };
+        let job = super::super::store::NewDaemonJob {
+            job_id: "job-recent-finish".into(),
+            recipe_snapshot: "/tmp/immutable-recipe.json".into(),
+            priority: 0, max_attempts: 1,
+            created_at_ms: (NOW - EIGHT_DAYS) as u64,
+            max_runtime_ms: 60_000, max_memory_bytes: None,
+            max_log_bytes: 1_024, repository_policy_json: None,
+            worktree_json: None, parent_run_id: None,
+        };
+        store.insert_preparing(&job, 128).unwrap();
+        store.mark_ingress_queued(&ingress_id, &job.job_id, NOW - EIGHT_DAYS + 1).unwrap();
+        store.connection.execute(
+            "UPDATE daemon_jobs SET state='succeeded', updated_at_ms=?1 WHERE job_id=?2",
+            rusqlite::params![NOW, &job.job_id],
+        ).unwrap();
+        let recovered = store
+            .recoverable_desktop_turns_since(10, NOW - SEVEN_DAYS).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].source_event_id, "long-running");
     }
 
     #[test]

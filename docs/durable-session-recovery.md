@@ -160,7 +160,7 @@ instead of treating a UI-only snapshot as a saved result.
 ## Completed run after desktop crash
 
 The daemon's recovery read query also includes **completed, failed and
-cancelled** desktop/voice turns admitted within the last seven days. This closes
+cancelled** desktop/voice turns **finished within the last seven days**. This closes
 the interval where a resident worker finishes after its desktop observer dies:
 on the next startup, the UI can replay the final ledger result without
 submitting another model request. Live or reconciliation-required work is
@@ -199,3 +199,9 @@ worker, grant a new tool permission, or erase its immutable run ledger. The
 tombstone is local to the desktop's storage origin; without writable browser
 storage only the running process can retain the suppression. Recovery is not
 a substitute for an explicit backend data-retention/deletion policy.
+
+The recent-terminal discovery window is measured from the daemon job's
+last recorded state change, **not** initial ingress admission. A turn submitted
+more than a week ago but completed during a lengthy background workflow remains
+discoverable if its completion was recent. The query orders those terminal runs
+by job update time and prioritizes active/reconciliation work.
