@@ -865,7 +865,16 @@ export async function watchDaemonDesktopTurn(
         callbacks.onProjection(projection);
         return projection;
       }
-      projection = projectDaemonTurnEvents(projection, events, run);
+      // A terminal run may have thousands of events while each page is capped
+      // at 1000. Terminal metadata is NOT evidence that the observer has
+      // consumed the whole journal: finalizing now would truncate the answer
+      // and discard the only replay cursor. Keep paging until caught up.
+      const pageEnd = events.length > 0
+        ? events[events.length - 1].sequence : link.lastSequence;
+      const caughtUp = typeof run.lastSequence !== "number" ||
+        pageEnd >= run.lastSequence;
+      const observableRun = caughtUp ? run : { ...run, status: "running" as const };
+      projection = projectDaemonTurnEvents(projection, events, observableRun);
       link = { ...link, lastSequence: projection.lastSequence, output: projection.output };
       saveActiveDaemonTurn(link);
       callbacks.onLinkChanged?.(link);
@@ -903,6 +912,7 @@ export async function watchDaemonDesktopTurn(
         }
         return projection;
       }
+      if (!caughtUp) continue; // Drain the rest of the durable page immediately.
       // A queued run says "Queued in the resident runner…" and nothing else,
       // which is the same sentence whether it is next in line or waiting for
       // 13 GiB that will not appear. The daemon already writes down why it held

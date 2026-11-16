@@ -470,6 +470,40 @@ describe("daemon desktop routing and event replay", () => {
     expect(mocks.daemonCancel).not.toHaveBeenCalled();
   });
 
+  it("does not truncate a terminal answer at the first 1000-event page", async () => {
+    const firstPage = Array.from({ length: 1_000 }, (_, i) => ({
+      sequence: i + 1,
+      event: { type: "model_delta",
+        payload: { channel: "assistant", text: "x" } },
+    })) as RunEventEnvelopeWire[];
+    const finalPage = [
+      { sequence: 1_001, event: { type: "model_delta",
+        payload: { channel: "assistant", text: "FINAL" } } },
+      { sequence: 1_002, event: { type: "completed",
+        payload: { summary: "whole answer", result_artifact_ids: [] } } },
+    ] as RunEventEnvelopeWire[];
+    mocks.getRun.mockResolvedValue({
+      status: "succeeded", lastSequence: 1_002,
+    } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(finalPage);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const projections: DaemonTurnProjection[] = [];
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 0,
+        lastSequence: 0, output: "" },
+      new AbortController().signal,
+      { onProjection: p => projections.push(p) }, false,
+    );
+    expect(projection.output).toBe("x".repeat(1_000) + "FINAL");
+    expect(projection.terminalStatus).toBe("succeeded");
+    expect(projection.lastSequence).toBe(1_002);
+    expect(mocks.loadRunEvents).toHaveBeenNthCalledWith(2, "r", 1_000, 1_000);
+    expect(projections[0].terminal).toBe(false);
+    expect(projections.at(-1)?.terminal).toBe(true);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
   it("retries an empty event page when run metadata advanced concurrently", async () => {
     mocks.getRun.mockResolvedValue({ status: "succeeded", lastSequence: 1 } as RunRecord);
     mocks.loadRunEvents
