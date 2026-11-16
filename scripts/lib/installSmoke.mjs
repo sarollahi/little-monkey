@@ -94,7 +94,7 @@ export function installPlanFor(platform, assets, arch = process.arch) {
 export function expectedPayload(platform) {
   switch (platform) {
     case "linux":
-      return ["usr/bin/little-monkey", "usr/lib/little-monkey/monkey"];
+      return ["usr/bin/little-monkey", "usr/bin/monkey-cli"];
     case "darwin":
       return ["Contents/MacOS/little-monkey", "Contents/Resources/monkey"];
     case "win32":
