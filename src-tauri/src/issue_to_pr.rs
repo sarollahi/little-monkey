@@ -1915,6 +1915,26 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_issue_run_updates_keep_all_records_under_transaction_lock() {
+        let path = temp_path("concurrent-run-checkpoints.json");
+        let mut workers = Vec::new();
+        for number in 1..=16_u32 {
+            let path = path.clone();
+            workers.push(std::thread::spawn(move || {
+                let _guard = lock_runs().unwrap();
+                let mut map = load_runs_from(&path).unwrap();
+                let run = fixture_run("owner/repo", number, number as u64, "planning");
+                map.insert(run.run_id.clone(), run);
+                save_runs_to(&path, &map).unwrap();
+            }));
+        }
+        for worker in workers { worker.join().unwrap(); }
+        let recovered = load_runs_from(&path).unwrap();
+        assert_eq!(recovered.len(), 16, "CI polls and token events cannot erase concurrent records");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn missing_store_is_empty_but_corrupt_store_fails_closed_and_preserves_bytes() {
         let path = temp_path("missing.json");
         assert!(load_runs_from(&path).unwrap().is_empty());
