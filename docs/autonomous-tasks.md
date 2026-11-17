@@ -132,7 +132,14 @@ disabled to prevent violating the configured limit. The operator also freezes
 a **per-agent wall-clock ceiling** (default 30 minutes) and a **total provider-
 reported token ceiling** (default 250,000) across implementation, review, and
 repair. Each model response is charged before tools execute; providers without
-metered token usage fail closed. Token-event idempotency survives app restarts.
+metered token usage fail closed. Token-event idempotency survives app restarts. The persisted JSON run store
+now rejects malformed data rather than loading an empty map and erasing
+unfinished runs on its next write. Checkpoints use individually named
+sync-to-disk temporary files before replacement. Complete in-process
+read/modify/write operations are serialized, so CI events cannot race with
+token charging, cancellation or a finished verification subprocess. A
+separate process must not write that desktop-owned store without a
+cross-process transaction protocol; daemon-only polling remains out of scope.
 
 Issue titles, descriptions, GitHub issue comments, review threads, and Actions
 logs are marked untrusted. The implementation agent's tools are bound to the
