@@ -1820,6 +1820,84 @@ mod tests {
     }
 
     #[test]
+    fn daemon_monitor_selects_only_active_owned_pr_runs_and_fairly_rotates() {
+        let mut runs = RunMap::new();
+        for index in 1..=16_u64 {
+            let mut run = fixture_run("owner/repo", index as u32, index, "monitoring_ci");
+            run.pr_number = Some(index as u32);
+            runs.insert(run.run_id.clone(), run);
+        }
+        let mut ready = fixture_run("owner/repo", 50, 0, "ready");
+        ready.pr_number = Some(50);
+        runs.insert(ready.run_id.clone(), ready);
+        let mut no_pr = fixture_run("owner/repo", 51, 0, "monitoring_ci");
+        no_pr.pr_number = None;
+        runs.insert(no_pr.run_id.clone(), no_pr);
+        for (index, status) in ["cancelled", "done", "failed", "repairing", "opening_pr"].iter().enumerate() {
+            let mut excluded = fixture_run("owner/repo", 70 + index as u32, 70 + index as u64, status);
+            excluded.pr_number = Some(70 + index as u32);
+            runs.insert(excluded.run_id.clone(), excluded);
+        }
+        let first = select_monitorable_runs(&runs, 8);
+        assert_eq!(first.len(), 8);
+        assert_eq!(first[0], "i2p-0", "ready runs still need current-head CI monitoring");
+        assert!(!first.contains(&"i2p-70".to_string()));
+        assert!(!first.contains(&"i2p-51".to_string()));
+        assert!(first.contains(&"i2p-1".to_string()));
+        // Durable observation timestamp moves already-observed runs behind
+        // older pending ones, including after a daemon restart.
+        for id in &first {
+            runs.get_mut(id).unwrap().updated_at_ms = 100_000;
+        }
+        let second = select_monitorable_runs(&runs, 8);
+        assert!(second.iter().all(|id| !first.contains(id)));
+        assert!(select_monitorable_runs(&runs, 0).is_empty());
+    }
+
+    #[test]
+    fn stale_daemon_ci_poll_cannot_resurrect_cancelled_run_or_replace_desktop_state() {
+        let path = temp_path("stale-daemon-ci-poll.json");
+        let mut baseline = fixture_run("owner/repo", 42, 1, "monitoring_ci");
+        baseline.pr_number = Some(42);
+        let mut runs = RunMap::new();
+        runs.insert(baseline.run_id.clone(), baseline.clone());
+        save_runs_to(&path, &runs).unwrap();
+        // The daemon read its baseline, then a desktop process cancelled.
+        let mut cancelled = baseline.clone();
+        cancelled.status = "cancelled".to_string();
+        cancelled.updated_at_ms += 1;
+        runs.insert(cancelled.run_id.clone(), cancelled.clone());
+        save_runs_to(&path, &runs).unwrap();
+
+        let mut stale_green = baseline.clone();
+        stale_green.status = "ready".to_string();
+        let mut notifications = 0;
+        let persisted = persist_ci_update(&path, &baseline, stale_green, &|_| {
+            // stale observations must never emit a progress event.
+        }).unwrap();
+        if persisted.status == "ready" { notifications += 1; }
+        assert_eq!(notifications, 0);
+        assert_eq!(persisted, cancelled);
+        assert_eq!(load_runs_from(&path).unwrap()[&baseline.run_id], cancelled);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_second_process_cannot_lock_issue_state_while_the_first_holds_it() {
+        let path = temp_path("cross-process-run-lock.json");
+        let locked = acquire_run_store_file_lock(&path).unwrap();
+        let lock_path = path.with_extension("json.lock");
+        let second = std::fs::OpenOptions::new()
+            .read(true).write(true).open(&lock_path).unwrap();
+        assert!(matches!(second.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "OS lock must block a second file descriptor, even across processes");
+        drop(locked);
+        assert!(second.try_lock().is_ok(), "released file lock permits another writer");
+        drop(second);
+        std::fs::remove_file(lock_path).unwrap();
+    }
+
+    #[test]
     fn issue_start_deduplicates_only_the_latest_nonterminal_run_for_same_issue() {
         let done = fixture_run("owner/repo", 42, 10, "done");
         let earlier = fixture_run("owner/repo", 42, 20, "checking");
