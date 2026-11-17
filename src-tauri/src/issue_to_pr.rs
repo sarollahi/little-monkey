@@ -1460,11 +1460,46 @@ pub fn issue_to_pr_begin_repair(app: AppHandle, run_id: String) -> Result<IssueT
 /// change CI to ready. Only a completed GitHub check rollup can do that.
 #[tauri::command]
 pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
-    m5_delivery::validate_id("run id", &run_id)?;
+    poll_ci_shared(&run_id, |run| emit_progress(&app, run))
+}
+
+/// The same authenticated, read-only GitHub observer used by the desktop.
+/// No Tauri handle, window or frontend is necessary; the installed daemon
+/// invokes it after restart using the persisted owned-worktree run identity.
+pub fn issue_to_pr_poll_ci_headless(run_id: &str) -> Result<IssueToPrRun, String> {
+    poll_ci_shared(run_id, |_| {})
+}
+
+fn persist_ci_update(
+    path: &Path,
+    baseline: &IssueToPrRun,
+    mut update: IssueToPrRun,
+    notify: &impl Fn(&IssueToPrRun),
+) -> Result<IssueToPrRun, String> {
+    // GitHub/network reads take place WITHOUT locking the run file.
+    // Compare the entire baseline after reacquiring the cross-process lock:
+    // cancellation, a newer desktop poll or repair must always win.
     let _guard = lock_runs()?;
+    let mut runs = load_runs_from(path)?;
+    let current = require_run(&runs, &baseline.run_id)?;
+    if current != *baseline { return Ok(current); }
+    update.updated_at_ms = now_ms()?;
+    runs.insert(update.run_id.clone(), update.clone());
+    save_runs_to(path, &runs)?;
+    drop(_guard);
+    notify(&update);
+    Ok(update)
+}
+
+fn poll_ci_shared(run_id: &str, notify: impl Fn(&IssueToPrRun)) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", run_id)?;
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path)?;
-    let mut run = require_run(&runs, &run_id)?;
+    let baseline = {
+        let _guard = lock_runs()?;
+        let runs = load_runs_from(&path)?;
+        require_run(&runs, run_id)?
+    };
+    let mut run = baseline.clone();
     if run.status != "monitoring_ci" && run.status != "ready" {
         return Err("CI monitoring requires an owned draft PR awaiting checks".to_string());
     }
@@ -1477,21 +1512,13 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
         run.status = "monitoring_ci".to_string();
         run.ci_head_oid = None;
         run.error = Some("Owned worktree identity changed or local files are dirty. Reconcile before CI readiness.".to_string());
-        run.updated_at_ms = now_ms()?;
-        runs.insert(run.run_id.clone(), run.clone());
-        save_runs_to(&path, &runs)?;
-        emit_progress(&app, &run);
-        return Ok(run);
+        return persist_ci_update(&path, &baseline, run, &notify);
     }
     if !reviewed_delivery_state_matches(&run, &inspection)? {
         run.status = "monitoring_ci".to_string();
         run.ci_head_oid = None;
         run.error = Some("Committed file scope or bytes changed after independent review".to_string());
-        run.updated_at_ms = now_ms()?;
-        runs.insert(run.run_id.clone(), run.clone());
-        save_runs_to(&path, &runs)?;
-        emit_progress(&app, &run);
-        return Ok(run);
+        return persist_ci_update(&path, &baseline, run, &notify);
     }
     let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
     if pr.get("isDraft").and_then(Value::as_bool) != Some(true)
@@ -1504,11 +1531,7 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
         run.status = "monitoring_ci".to_string();
         run.ci_head_oid = None;
         run.error = Some("PR draft/ownership/base state changed; reconcile before readiness or final approval".to_string());
-        run.updated_at_ms = now_ms()?;
-        runs.insert(run.run_id.clone(), run.clone());
-        save_runs_to(&path, &runs)?;
-        emit_progress(&app, &run);
-        return Ok(run);
+        return persist_ci_update(&path, &baseline, run, &notify);
     }
     let head_oid = pr.get("headRefOid").and_then(Value::as_str)
         .ok_or_else(|| "GitHub did not return the draft PR head".to_string())?;
@@ -1516,22 +1539,14 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
         run.status = "monitoring_ci".to_string();
         run.ci_head_oid = None;
         run.error = Some("Draft PR head differs from the owned local branch; manual reconciliation required".to_string());
-        run.updated_at_ms = now_ms()?;
-        runs.insert(run.run_id.clone(), run.clone());
-        save_runs_to(&path, &runs)?;
-        emit_progress(&app, &run);
-        return Ok(run);
+        return persist_ci_update(&path, &baseline, run, &notify);
     }
     let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
     if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid) {
         run.status = "monitoring_ci".to_string();
         run.ci_head_oid = None;
         run.error = Some("GitHub CI snapshot is for a stale PR head".to_string());
-        run.updated_at_ms = now_ms()?;
-        runs.insert(run.run_id.clone(), run.clone());
-        save_runs_to(&path, &runs)?;
-        emit_progress(&app, &run);
-        return Ok(run);
+        return persist_ci_update(&path, &baseline, run, &notify);
     }
     let (mut verdict, mut checks) = classify_ci_rollup(&rollup)?;
     checks.sort_by(|a, b| (&a.name, &a.state, &a.conclusion, &a.url)
@@ -1571,11 +1586,7 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
     } else if verdict == "passed" {
         run.error = None;
     }
-    run.updated_at_ms = now_ms()?;
-    runs.insert(run.run_id.clone(), run.clone());
-    save_runs_to(&path, &runs)?;
-    emit_progress(&app, &run);
-    Ok(run)
+    persist_ci_update(&path, &baseline, run, &notify)
 }
 
 /// Returns only a single draft PR on this repository's exact owned branch,
