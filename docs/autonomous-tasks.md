@@ -206,7 +206,7 @@ fixture:
 2. Through the app's existing issue flow, approve commit, push and draft PR.
    Wait until the persisted run is `monitoring_ci`, then **close the desktop
    process** without stopping the OS user service.
-3. Include an interruption after the GitHub create-draft-PR mutation
+3. In a separate crash-recovery case, interrupt after the GitHub create-draft-PR mutation
    succeeds but before the desktop records the PR number. On daemon
    restart, it must discover and adopt only that same owned draft PR,
    without issuing another create or push request.
@@ -215,7 +215,7 @@ fixture:
    (subject to GitHub response time and the eight-run-per-pass cap).
    Restarting the installed service during that interval must not discard
    or duplicate observations.
-4. A current-head failed check must move the run to `repairing` (or
+5. A current-head failed check must move the run to `repairing` (or
    `failed` once its frozen limit is exhausted) **without** running an
    agent, consuming a retry attempt, committing, pushing or updating a PR.
    Reopening the desktop can resume the existing bounded repair.
