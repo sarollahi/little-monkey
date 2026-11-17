@@ -101,7 +101,11 @@ surviving changed files, coverage requires an actual successful `read_file`
 result from the read-only reviewer, not just the model's own
 `filesReviewed` claim. Deleted files remain reviewable from the diff.
 Missing tool evidence, truncated or oversized diffs, and changed revisions
-fail closed. Results, failed checks, review evidence, and the durable task link remain inspectable
+fail closed. The native revision digest also enumerates non-ignored **untracked
+files recursively through Git** and hashes their bytes and permissions under
+a bounded 128 MiB / 2,048-file limit; untracked symlinks and paths escaping
+the owned worktree are refused. A newly created file cannot silently change
+after verification simply because it was absent from `git diff`. Results, failed checks, review evidence, and the durable task link remain inspectable
 from the issue panel/run ledger.
 
 Git delivery is deliberately not autonomous: the issue coordinator
