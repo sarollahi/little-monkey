@@ -17,6 +17,7 @@ use super::store::{DaemonPaths, DaemonStore};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(45);
 const MAX_RUNS_PER_PASS: usize = 8;
+const MAX_RECOVERIES_PER_PASS: usize = 2;
 
 fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
     // Reuse the existing daemon's global pause/stop controls. Maintenance
@@ -27,6 +28,21 @@ fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
         return Ok(());
     }
     drop(store);
+    // An approved draft PR may already exist remotely when the desktop
+    // closes between GitHub success and persisting the PR number. Read-only
+    // reconciliation adopts only the exact owned, reviewed branch/HEAD.
+    // Never retry the original create mutation or guess a PR identity.
+    for run_id in issue_to_pr::issue_to_pr_reconcilable_run_ids(MAX_RECOVERIES_PER_PASS)? {
+        match issue_to_pr::issue_to_pr_reconcile_pr_headless(&run_id) {
+            Ok(run) if run.status == "monitoring_ci" => {
+                eprintln!("monkey daemon: recovered existing owned draft PR for issue-to-pr {}", run_id);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("monkey daemon: issue-to-pr {} draft reconciliation unavailable: {error}", run_id);
+            }
+        }
+    }
     let ids = issue_to_pr::issue_to_pr_monitorable_run_ids(MAX_RUNS_PER_PASS)?;
     for run_id in ids {
         // All GitHub calls are read-only, authenticated gh invocations in the
@@ -86,6 +102,7 @@ mod tests {
     #[test]
     fn daemon_monitor_is_bounded_and_only_reads_owned_run_state() {
         assert!(MAX_RUNS_PER_PASS > 0 && MAX_RUNS_PER_PASS <= 32);
+        assert!(MAX_RECOVERIES_PER_PASS > 0 && MAX_RECOVERIES_PER_PASS <= MAX_RUNS_PER_PASS);
         assert!(POLL_INTERVAL >= Duration::from_secs(30));
         // The shared Rust poller owns all network/transition logic. This
         // daemon task is deliberately only a periodic read-only bridge.
