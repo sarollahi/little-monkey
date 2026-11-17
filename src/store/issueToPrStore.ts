@@ -196,6 +196,7 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
    * every failure path reports itself onto the run record via
    * `advanceIssueToPr` instead. */
   const driveRun = async (run: IssueToPrRun): Promise<void> => {
+    if (controllers.has(run.runId)) return; // A second Start click cannot duplicate the live agent.
     const controller = new AbortController();
     controllers.set(run.runId, controller);
     try {
@@ -411,6 +412,13 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
     start: (issueUrl, maxRepairAttempts = 2, agentWallTimeMs = 30 * 60_000, totalTokenBudget = 250_000) =>
       perform("start", async () => {
         const initial = await api.startIssueToPr(issueUrl);
+        // Native issue intake returns the same nonterminal run for repeated
+        // starts. Do not reset its frozen budget or schedule another agent.
+        if (initial.status !== "planning") {
+          set((state) => ({ runs: upsertRun(state.runs, initial), selectedRunId: initial.runId }));
+          resumeOrphanedRun(initial);
+          return initial;
+        }
         await api.setIssueToPrRepairLimit(initial.runId, maxRepairAttempts);
         const run = await api.setIssueToPrExecutionBudget(initial.runId, agentWallTimeMs, totalTokenBudget);
         set((state) => ({ runs: upsertRun(state.runs, run), selectedRunId: run.runId }));
