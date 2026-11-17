@@ -23,7 +23,8 @@
 //! write.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::io::Read;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -340,6 +341,88 @@ fn bounded(value: &str, max: usize) -> String {
     format!("{}…", &value[..end])
 }
 
+/// Included in both verification and independent-review fingerprints. Git
+/// diff and porcelain status record untracked file NAMES but not their bytes;
+/// hashing only those records allowed an untracked source file to change
+/// without invalidating passed tests or a prior independent review.
+///
+/// Ask Git to enumerate every non-ignored untracked file (including inside
+/// directories that porcelain collapses). Never follow symlinks or hash an
+/// unbounded binary blob into the model evidence pipeline.
+fn hash_untracked_contents(root: &Path, hasher: &mut Sha256) -> Result<(), String> {
+    const MAX_FILES: usize = 2_048;
+    const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+    let output = std::process::Command::new("git")
+        .arg("-C").arg(root)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output().map_err(|e| format!("Could not list untracked owned files: {e}"))?;
+    if !output.status.success() {
+        return Err("Could not enumerate untracked owned files; revision evidence is unavailable".to_string());
+    }
+    if output.stdout.len() > 4 * 1024 * 1024 {
+        return Err("Too many untracked paths to fingerprint safely".to_string());
+    }
+    let root = root.canonicalize()
+        .map_err(|e| format!("Could not canonicalize owned worktree: {e}"))?;
+    let mut total_bytes = 0_u64;
+    let mut file_count = 0_usize;
+    for raw in output.stdout.split(|byte| *byte == 0).filter(|bytes| !bytes.is_empty()) {
+        file_count += 1;
+        if file_count > MAX_FILES { return Err("Too many untracked files to verify".to_string()); }
+        let relative = std::str::from_utf8(raw)
+            .map_err(|_| "Untracked filename is not valid UTF-8".to_string())?;
+        let relative_path = Path::new(relative);
+        if !relative_path.components().all(|part| matches!(part, Component::Normal(_))) {
+            return Err("Untracked file path escapes owned worktree".to_string());
+        }
+        let file_path = root.join(relative_path);
+        let metadata = std::fs::symlink_metadata(&file_path)
+            .map_err(|e| format!("Cannot inspect untracked file {relative}: {e}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!("Untracked file {relative} must be a regular file; stage and review links separately"));
+        }
+        let physical_path = file_path.canonicalize()
+            .map_err(|e| format!("Cannot resolve untracked file {relative}: {e}"))?;
+        if !physical_path.starts_with(&root) {
+            return Err("Untracked file resolves outside owned worktree".to_string());
+        }
+        total_bytes = total_bytes.checked_add(metadata.len())
+            .ok_or_else(|| "Untracked content size overflow".to_string())?;
+        if total_bytes > MAX_TOTAL_BYTES {
+            return Err("Untracked file contents exceed the bounded 128 MiB evidence limit".to_string());
+        }
+        hasher.update((raw.len() as u64).to_le_bytes());
+        hasher.update(raw);
+        hasher.update(metadata.len().to_le_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            hasher.update(metadata.permissions().mode().to_le_bytes());
+        }
+        #[cfg(not(unix))]
+        hasher.update([u8::from(metadata.permissions().readonly())]);
+        let mut file = std::fs::File::open(&file_path)
+            .map_err(|e| format!("Cannot read untracked file {relative}: {e}"))?;
+        let mut buffer = [0_u8; 32 * 1024];
+        let mut read_bytes = 0_u64;
+        loop {
+            let n = file.read(&mut buffer)
+                .map_err(|e| format!("Cannot fingerprint untracked file {relative}: {e}"))?;
+            if n == 0 { break; }
+            read_bytes += n as u64;
+            if read_bytes > metadata.len() || read_bytes > MAX_TOTAL_BYTES {
+                return Err("Untracked file changed or grew during revision fingerprinting".to_string());
+            }
+            hasher.update(&buffer[..n]);
+        }
+        if read_bytes != metadata.len() {
+            return Err("Untracked file size changed during revision fingerprinting".to_string());
+        }
+    }
+    hasher.update((file_count as u64).to_le_bytes());
+    Ok(())
+}
+
 fn inspection_digest(inspection: &m5_delivery::WorktreeInspection) -> Result<String, String> {
     if inspection.diffs.staged.truncated || inspection.diffs.unstaged.truncated || inspection.diffs.head.truncated {
         return Err("Owned diff exceeds verification evidence limits".to_string());
@@ -347,7 +430,10 @@ fn inspection_digest(inspection: &m5_delivery::WorktreeInspection) -> Result<Str
     let serialized = serde_json::to_vec(&(
         &inspection.head_oid, &inspection.files, &inspection.diffs
     )).map_err(|error| format!("Could not fingerprint owned worktree: {error}"))?;
-    Ok(format!("{:x}", Sha256::digest(&serialized)))
+    let mut hasher = Sha256::new();
+    hasher.update(&serialized);
+    hash_untracked_contents(Path::new(&inspection.worktree.marker.canonical_path), &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn now_ms() -> Result<u64, String> {
