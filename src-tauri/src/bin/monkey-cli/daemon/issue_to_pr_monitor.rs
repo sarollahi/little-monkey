@@ -13,21 +13,35 @@
 use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
 use little_monkey_lib::issue_to_pr;
-use super::store::{DaemonPaths, DaemonStore};
+use super::store::DaemonPaths;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(45);
 const MAX_RUNS_PER_PASS: usize = 8;
 const MAX_RECOVERIES_PER_PASS: usize = 2;
 
+/// Read the existing daemon database without opening a second DaemonStore.
+/// The daemon already owns/migrates it; polling must not redo schema
+/// migrations or shared-ledger initialization every 45 seconds.
+fn daemon_ci_poll_paused(paths: &DaemonPaths) -> Result<bool, String> {
+    let conn = Connection::open_with_flags(&paths.state_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("Could not inspect existing daemon controls: {e}"))?;
+    conn.busy_timeout(Duration::from_secs(3)).map_err(|e| e.to_string())?;
+    let meta = |key: &str| -> Result<Option<String>, String> {
+        conn.query_row(
+            "SELECT value FROM daemon_meta WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())
+    };
+    Ok(meta("kill_switch")?.as_deref() == Some("engaged")
+        || meta("maintenance_drain")?.as_deref() == Some("1"))
+}
+
 fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
-    // Reuse the existing daemon's global pause/stop controls. Maintenance
-    // drain and the kill switch must also suppress read-only outbound GitHub
-    // checks, even though they do not consume an agent queue slot.
-    let store = DaemonStore::open(paths)?;
-    if store.kill_switch()? || store.get_meta("maintenance_drain")?.as_deref() == Some("1") {
-        return Ok(());
-    }
-    drop(store);
+    // Respect the already-authoritative resident daemon pause/stop controls,
+    // using only a read-only SQLite connection to existing service state.
+    if daemon_ci_poll_paused(paths)? { return Ok(()); }
     // An approved draft PR may already exist remotely when the desktop
     // closes between GitHub success and persisting the PR number. Read-only
     // reconciliation adopts only the exact owned, reviewed branch/HEAD.
@@ -98,6 +112,33 @@ pub(super) fn spawn(paths: DaemonPaths) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watcher_obeys_existing_kill_switch_and_maintenance_drain_from_read_only_db() {
+        let app_data = std::env::temp_dir().join(format!(
+            "lm-daemon-ci-controls-{}", uuid::Uuid::new_v4()
+        ));
+        let paths = DaemonPaths::under(&app_data);
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let conn = Connection::open(&paths.state_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE daemon_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        ).unwrap();
+        assert!(!daemon_ci_poll_paused(&paths).unwrap());
+        conn.execute("INSERT INTO daemon_meta(key, value) VALUES ('maintenance_drain', '1')", [])
+            .unwrap();
+        assert!(daemon_ci_poll_paused(&paths).unwrap());
+        conn.execute("UPDATE daemon_meta SET value = '0' WHERE key = 'maintenance_drain'", [])
+            .unwrap();
+        conn.execute("INSERT INTO daemon_meta(key, value) VALUES ('kill_switch', 'engaged')", [])
+            .unwrap();
+        assert!(daemon_ci_poll_paused(&paths).unwrap());
+        conn.execute("UPDATE daemon_meta SET value = 'released' WHERE key = 'kill_switch'", [])
+            .unwrap();
+        assert!(!daemon_ci_poll_paused(&paths).unwrap());
+        drop(conn);
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
 
     #[test]
     fn daemon_monitor_is_bounded_and_only_reads_owned_run_state() {
