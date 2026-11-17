@@ -1868,6 +1868,60 @@ mod tests {
     }
 
     #[test]
+    fn daemon_can_persist_and_resume_green_ci_without_a_tauri_app_handle() {
+        let path = temp_path("daemon-unattended-green.json");
+        let head = "a".repeat(40);
+        let checks = vec![CiCheckEvidence {
+            name: "ci / tests".to_string(),
+            state: "COMPLETED".to_string(),
+            conclusion: "SUCCESS".to_string(),
+            url: None,
+        }];
+        let mut initial = fixture_run("owner/repo", 42, 100, "monitoring_ci");
+        initial.pr_number = Some(42);
+        initial.ci_head_oid = Some(head.clone());
+        let mut runs = RunMap::new();
+        runs.insert(initial.run_id.clone(), initial.clone());
+        save_runs_to(&path, &runs).unwrap();
+
+        // First green GitHub snapshot remains pending until a second,
+        // identical observation at least 30 seconds later.
+        let first_verdict = settled_ci_verdict("passed", &head, &checks, None, 1_000);
+        assert_eq!(first_verdict, "pending");
+        let first_observation = CiObservation {
+            head_oid: head.clone(),
+            verdict: first_verdict,
+            checks: checks.clone(),
+            observed_at_ms: 1_000,
+        };
+        let mut first_update = initial.clone();
+        first_update.ci_history.push(first_observation);
+        let first = persist_ci_update(&path, &initial, first_update, &|_| {}).unwrap();
+        assert_eq!(first.status, "monitoring_ci");
+        let recovered = load_runs_from(&path).unwrap()[&initial.run_id].clone();
+        assert_eq!(recovered.ci_history.len(), 1);
+
+        let second_verdict = settled_ci_verdict(
+            "passed", &head, &checks, recovered.ci_history.last(), 31_100,
+        );
+        assert_eq!(second_verdict, "passed");
+        let mut green = recovered.clone();
+        green.ci_history.push(CiObservation {
+            head_oid: head.clone(),
+            verdict: second_verdict,
+            checks,
+            observed_at_ms: 31_100,
+        });
+        green.status = "ready".to_string();
+        let ready = persist_ci_update(&path, &recovered, green, &|_| {}).unwrap();
+        assert_eq!(ready.status, "ready");
+        assert_eq!(ready.ci_history.len(), 2);
+        assert_eq!(load_runs_from(&path).unwrap()[&initial.run_id], ready);
+        assert_ne!(ready.status, "done", "Daemon never publishes or merges a draft PR");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn daemon_network_error_revokes_ready_but_never_consumes_repairs_or_changes_terminal_runs() {
         let mut ready = fixture_run("owner/repo", 77, 100, "ready");
         ready.ci_head_oid = Some("a".repeat(40));
