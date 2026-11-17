@@ -231,7 +231,10 @@ fixture:
 8. Engage the daemon kill switch or maintenance drain. No outbound CI
    poll should occur until the existing daemon control permits it again.
 
-The daemon uses its current-user GitHub CLI authentication. It does **not**
+The daemon uses its current-user GitHub CLI authentication and is
+**pinned to the active app-data profile it served at startup**. Switching
+profiles requires re-ensuring the corresponding user service; an old
+daemon refuses to poll a different profile's PR records. It does **not**
 store GitHub credentials in issue records, create an independent polling
 database, or execute any issue-supplied command. The desktop and daemon
 coordinate the same JSON run record with a stable OS file lock; GitHub
