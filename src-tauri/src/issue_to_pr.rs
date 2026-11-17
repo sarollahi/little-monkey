@@ -109,6 +109,13 @@ pub struct ReviewEvidence {
     pub files_reviewed: Vec<String>,
     pub summary: String,
     pub observed_at_ms: u64,
+    /// HEAD at the time of independent review, before the human-approved commit.
+    #[serde(default)]
+    pub reviewed_head_oid: String,
+    /// Content snapshot is independent of Git's precommit/postcommit index
+    /// representation so a safely committed patch can resume after a crash.
+    #[serde(default)]
+    pub reviewed_contents_digest: String,
 }
 
 /// One issue-to-PR run. Persisted whole (not event-sourced) at
@@ -429,6 +436,111 @@ fn hash_untracked_contents(root: &Path, hasher: &mut Sha256) -> Result<(), Strin
     }
     hasher.update((file_count as u64).to_le_bytes());
     Ok(())
+}
+
+/// Stable file-content proof for the exact changed-file set reviewed before
+/// Git commit. Deleted paths are represented explicitly. Hashes actual bytes,
+/// not Git status entries, and refuses link traversal and oversized assets.
+fn reviewed_contents_digest(root: &Path, files: &[String]) -> Result<String, String> {
+    if files.is_empty() || files.len() > 512 {
+        return Err("Review content snapshot must contain 1..512 files".to_string());
+    }
+    let root = root.canonicalize()
+        .map_err(|e| format!("Could not resolve owned worktree: {e}"))?;
+    let mut files = files.to_vec();
+    files.sort();
+    files.dedup();
+    let mut total_bytes = 0_u64;
+    let mut sha = Sha256::new();
+    for relative in files {
+        let path = Path::new(&relative);
+        if !path.components().all(|part| matches!(part, Component::Normal(_))) {
+            return Err("Reviewed content path must stay inside the owned worktree".to_string());
+        }
+        sha.update((relative.len() as u64).to_le_bytes());
+        sha.update(relative.as_bytes());
+        let full = root.join(path);
+        let metadata = match std::fs::symlink_metadata(&full) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                sha.update([0_u8]); // Reviewed deletion
+                continue;
+            }
+            Err(error) => return Err(format!("Cannot inspect reviewed path {relative}: {error}")),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Reviewed file must be regular; symlinks and directories need manual review".to_string());
+        }
+        if !full.canonicalize().map_err(|e| e.to_string())?.starts_with(&root) {
+            return Err("Reviewed path resolves outside owned worktree".to_string());
+        }
+        total_bytes = total_bytes.checked_add(metadata.len())
+            .ok_or_else(|| "Reviewed content exceeds size limit".to_string())?;
+        if total_bytes > 128 * 1024 * 1024 {
+            return Err("Reviewed content exceeds bounded 128 MiB limit".to_string());
+        }
+        sha.update([1_u8]);
+        sha.update(metadata.len().to_le_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            sha.update(metadata.permissions().mode().to_le_bytes());
+        }
+        #[cfg(not(unix))]
+        sha.update([u8::from(metadata.permissions().readonly())]);
+        let mut file = std::fs::File::open(&full)
+            .map_err(|e| format!("Could not read reviewed path {relative}: {e}"))?;
+        let mut buffer = [0_u8; 32 * 1024];
+        let mut remaining = metadata.len();
+        loop {
+            let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            if (n as u64) > remaining { return Err("Reviewed file changed while hashing".to_string()); }
+            remaining -= n as u64;
+            sha.update(&buffer[..n]);
+        }
+        if remaining != 0 { return Err("Reviewed file changed while hashing".to_string()); }
+    }
+    Ok(format!("{:x}", sha.finalize()))
+}
+
+/// The original dirty diff is valid before commit. After the typed-approval
+/// commit, the exact one new commit must have reviewed HEAD as its parent,
+/// change only reviewed paths, and contain byte-for-byte reviewed file data.
+fn reviewed_delivery_state_matches(
+    run: &IssueToPrRun,
+    inspection: &m5_delivery::WorktreeInspection,
+) -> Result<bool, String> {
+    let Some(review) = &run.review_evidence else { return Ok(false) };
+    if review.revision == inspection_digest(inspection)? { return Ok(true); }
+    if inspection.dirty || review.reviewed_head_oid.is_empty() || review.reviewed_contents_digest.is_empty() {
+        return Ok(false);
+    }
+    let root = Path::new(&inspection.worktree.marker.canonical_path);
+    let output = std::process::Command::new("git").arg("-C").arg(root)
+        .args(["rev-parse", "HEAD^"]).output()
+        .map_err(|e| format!("Cannot inspect approved commit parent: {e}"))?;
+    if !output.status.success()
+        || String::from_utf8_lossy(&output.stdout).trim() != review.reviewed_head_oid
+    {
+        return Ok(false);
+    }
+    let names = std::process::Command::new("git").arg("-C").arg(root)
+        .args(["diff", "--name-only", "--no-renames", "-z", &review.reviewed_head_oid, "HEAD", "--"])
+        .output().map_err(|e| format!("Cannot inspect committed file scope: {e}"))?;
+    if !names.status.success() || names.stdout.len() > 4 * 1024 * 1024 { return Ok(false); }
+    let mut changed = names.stdout.split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| std::str::from_utf8(name).map(str::to_string))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Commit contains non-UTF8 paths; manual review required".to_string())?;
+    changed.sort();
+    changed.dedup();
+    let mut reviewed = review.files_reviewed.clone();
+    reviewed.sort();
+    reviewed.dedup();
+    if changed != reviewed { return Ok(false); }
+    Ok(reviewed_contents_digest(root, &review.files_reviewed)? == review.reviewed_contents_digest)
 }
 
 fn inspection_digest(inspection: &m5_delivery::WorktreeInspection) -> Result<String, String> {
@@ -1013,11 +1125,17 @@ pub fn issue_to_pr_record_review(
     if changed.is_empty() || changed.iter().any(|path| !files_reviewed.iter().any(|reviewed| reviewed.as_str() == *path)) {
         return Err("Independent review did not cover every changed file".to_string());
     }
+    let reviewed_head_oid = inspection.head_oid.clone();
+    let reviewed_contents_digest = reviewed_contents_digest(
+        Path::new(&inspection.worktree.marker.canonical_path), &files_reviewed,
+    )?;
     run.review_evidence = Some(ReviewEvidence {
         revision,
         files_reviewed,
         summary: bounded(&summary, 4_000),
         observed_at_ms: now_ms()?,
+        reviewed_head_oid,
+        reviewed_contents_digest,
     });
     run.updated_at_ms = now_ms()?;
     runs.insert(run.run_id.clone(), run.clone());
