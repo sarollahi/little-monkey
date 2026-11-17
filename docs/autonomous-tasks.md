@@ -125,8 +125,12 @@ After the operator approves delivery, the panel polls GitHub's real
 `monkey daemon` user service now polls the same authoritative Rust
 observer every 45 seconds**, including when the desktop process is closed.
 The daemon discovers `monitoring_ci` and `ready` runs on each startup and
-checks up to eight oldest-unobserved runs per pass; it performs no network
-work if no run is waiting. Both use the same persisted evidence, GitHub
+checks up to eight oldest-unobserved runs per pass. It can also **read-only
+reconcile up to two `opening_pr` runs per pass** if the desktop disappeared
+after an approved GitHub create but before local PR-number persistence. Only
+an exact owned, clean, previously reviewed branch/base/HEAD and already-open
+draft PR can be adopted; the daemon never reissues PR creation. It performs
+no GitHub calls if no run needs observation or reconciliation. Both use the same persisted evidence, GitHub
 authentication, owned branch checks, revision-bound review, and CI settling
 rule. Unavailable GitHub/network/auth responses revoke `ready` without
 consuming a model repair attempt; polling retries on the next pass. Observations are persisted by exact
@@ -202,7 +206,11 @@ fixture:
 2. Through the app's existing issue flow, approve commit, push and draft PR.
    Wait until the persisted run is `monitoring_ci`, then **close the desktop
    process** without stopping the OS user service.
-3. Finish a GitHub Actions job. The daemon's shared Rust observer should
+3. Include an interruption after the GitHub create-draft-PR mutation
+   succeeds but before the desktop records the PR number. On daemon
+   restart, it must discover and adopt only that same owned draft PR,
+   without issuing another create or push request.
+4. Finish a GitHub Actions job. The daemon's shared Rust observer should
    persist a new `ci_history` observation within one 45-second poll cycle
    (subject to GitHub response time and the eight-run-per-pass cap).
    Restarting the installed service during that interval must not discard
@@ -211,16 +219,16 @@ fixture:
    `failed` once its frozen limit is exhausted) **without** running an
    agent, consuming a retry attempt, committing, pushing or updating a PR.
    Reopening the desktop can resume the existing bounded repair.
-5. A current-head stable-green result requires two matching observations
+6. A current-head stable-green result requires two matching observations
    at least 30 seconds apart; the daemon may mark `ready` but never
    publish or merge. Changing the draft PR head, base, ownership, or
    verified files must revoke readiness.
-6. Disconnect GitHub or make `gh` authentication unavailable while the
+7. Disconnect GitHub or make `gh` authentication unavailable while the
    daemon is running: an existing `ready` status must be revoked to
    `monitoring_ci` with a persisted transient error. Restore connectivity;
    it should clear on a subsequent valid observation without consuming a
    repair attempt.
-7. Engage the daemon kill switch or maintenance drain. No outbound CI
+8. Engage the daemon kill switch or maintenance drain. No outbound CI
    poll should occur until the existing daemon control permits it again.
 
 The daemon uses its current-user GitHub CLI authentication. It does **not**
