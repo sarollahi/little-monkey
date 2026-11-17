@@ -37,16 +37,42 @@ use crate::verify::{run_command_impl, VerifyCommand};
 use crate::{workspace, AppState};
 
 const RUNS_FILE: &str = "issue_to_pr_runs.json";
-// Single desktop process owns the run record. Serialize complete
-// read/modify/write operations: a simultaneous CI poll, model token charge,
-// cancellation or verification completion must never overwrite each other.
+// In-process mutex plus OS file lock serialize every whole-record mutation
+// across the desktop and the separately running monkey-cli daemon. The file
+// lock is attached to a stable inode (never renamed or deleted). File::lock
+// is supported by Rust 1.89+ on Linux/macOS/Windows with no new dependency.
 static RUNS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-// Separate asynchronous start lease prevents two simultaneous requests from
-// creating/attaching duplicate worktrees before either can persist a run.
+// Separate asynchronous start lease prevents duplicate worktree creation.
 static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn lock_runs() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    RUNS_LOCK.lock().map_err(|_| "Durable issue run store transaction lock is poisoned".to_string())
+struct RunStoreGuard {
+    // Drop order matters: unlock the OS file first, then the process mutex.
+    _file: std::fs::File,
+    _thread: std::sync::MutexGuard<'static, ()>,
+}
+
+fn acquire_run_store_file_lock(path: &Path) -> Result<std::fs::File, String> {
+    let lock_path = path.with_extension("json.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true).write(true).create(true)
+        .open(&lock_path)
+        .map_err(|error| format!("Cannot open issue run store lock: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Cannot protect issue run store lock: {error}"))?;
+    }
+    file.lock().map_err(|error| format!("Cannot lock issue run store: {error}"))?;
+    Ok(file)
+}
+
+fn lock_runs() -> Result<RunStoreGuard, String> {
+    let thread = RUNS_LOCK.lock()
+        .map_err(|_| "Durable issue run store transaction lock is poisoned".to_string())?;
+    let path = runs_path()?;
+    let file = acquire_run_store_file_lock(&path)?;
+    Ok(RunStoreGuard { _file: file, _thread: thread })
 }
 const PROGRESS_EVENT: &str = "issue-to-pr://progress";
 const MAX_RUNS: usize = 500;
