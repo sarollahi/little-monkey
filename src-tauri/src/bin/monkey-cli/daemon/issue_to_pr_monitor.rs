@@ -35,7 +35,8 @@ fn daemon_ci_poll_paused(paths: &DaemonPaths) -> Result<bool, String> {
         ).optional().map_err(|e| e.to_string())
     };
     Ok(meta("kill_switch")?.as_deref() == Some("engaged")
-        || meta("maintenance_drain")?.as_deref() == Some("1"))
+        || meta("maintenance_drain")?.as_deref() == Some("1")
+        || meta("stop_requested")?.as_deref() == Some("1"))
 }
 
 fn daemon_ci_poll_allowed(paths: &DaemonPaths) -> Result<bool, String> {
@@ -152,6 +153,14 @@ mod tests {
             .unwrap();
         assert!(daemon_ci_poll_paused(&paths).unwrap());
         conn.execute("UPDATE daemon_meta SET value = 'released' WHERE key = 'kill_switch'", [])
+            .unwrap();
+        assert!(!daemon_ci_poll_paused(&paths).unwrap());
+        // A graceful stop can drain active workers before the OS service
+        // exits. CI must not start another GitHub request during that drain.
+        conn.execute("INSERT INTO daemon_meta(key, value) VALUES ('stop_requested', '1')", [])
+            .unwrap();
+        assert!(daemon_ci_poll_paused(&paths).unwrap());
+        conn.execute("UPDATE daemon_meta SET value = '0' WHERE key = 'stop_requested'", [])
             .unwrap();
         assert!(!daemon_ci_poll_paused(&paths).unwrap());
         drop(conn);
