@@ -29,6 +29,7 @@ pub(crate) mod fail_points;
 #[cfg(test)]
 mod ingress_contract;
 pub(crate) mod ingress_store;
+mod issue_to_pr_monitor;
 mod ledger;
 /// The whole path against a real provider account, agent included.
 #[cfg(test)]
@@ -3409,6 +3410,10 @@ async fn serve(cli: &crate::Cli) -> Result<(), String> {
     // long-polling provider blocks for half a minute at a time, and the queue
     // must keep ticking while it does.
     channel_worker::spawn_channel_runtime(paths.clone());
+    // Reuse the desktop's authoritative GitHub CI observer inside this
+    // resident OS service. Read-only polling continues after the WebView
+    // closes and rediscovers pending draft PRs on every daemon restart.
+    issue_to_pr_monitor::spawn();
     // Call limits. Separate from the channel runtime because it enforces
     // deadlines rather than moving messages: a call nobody is watching keeps
     // costing money whether or not any provider is polling.
