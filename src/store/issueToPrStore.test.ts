@@ -134,6 +134,17 @@ beforeEach(() => {
 });
 
 describe("issueToPrStore", () => {
+  it("repeated Start reattaches the existing nonterminal issue without resetting budget or duplicating coding", async () => {
+    const existing = fixtureRun({ status: "awaiting_review", repairAttempts: 1, tokensUsed: 700 });
+    api.startIssueToPr.mockResolvedValue(existing);
+    const actual = await useIssueToPrStore.getState().start(existing.issueUrl, 4, 60_000, 50_000);
+    expect(actual).toEqual(existing);
+    expect(api.setIssueToPrRepairLimit).not.toHaveBeenCalled();
+    expect(api.setIssueToPrExecutionBudget).not.toHaveBeenCalled();
+    expect(runner.runIssueToPrAgent).not.toHaveBeenCalled();
+    expect(useIssueToPrStore.getState().selectedRunId).toBe(existing.runId);
+  });
+
   it("init wires the progress listener exactly once and loads the run list", async () => {
     api.listIssueToPrRuns.mockResolvedValue([fixtureRun()]);
     await useIssueToPrStore.getState().init();
