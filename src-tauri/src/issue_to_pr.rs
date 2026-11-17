@@ -41,6 +41,9 @@ const RUNS_FILE: &str = "issue_to_pr_runs.json";
 // read/modify/write operations: a simultaneous CI poll, model token charge,
 // cancellation or verification completion must never overwrite each other.
 static RUNS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Separate asynchronous start lease prevents two simultaneous requests from
+// creating/attaching duplicate worktrees before either can persist a run.
+static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn lock_runs() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     RUNS_LOCK.lock().map_err(|_| "Durable issue run store transaction lock is poisoned".to_string())
@@ -305,6 +308,20 @@ pub fn find_reusable_worktree(
         })
         .max_by_key(|run| run.created_at_ms)
         .map(|run| run.worktree_id.clone())
+}
+
+fn find_active_issue_run<'a>(
+    runs: &'a [IssueToPrRun],
+    repository_slug: &str,
+    issue_number: u32,
+) -> Option<&'a IssueToPrRun> {
+    runs.iter()
+        .filter(|run| {
+            run.repository_slug.eq_ignore_ascii_case(repository_slug)
+                && run.issue_number == issue_number
+                && !is_terminal(&run.status)
+        })
+        .max_by_key(|run| (run.created_at_ms, &run.run_id))
 }
 
 fn detect_package_manager(root: &Path) -> &'static str {
@@ -667,6 +684,7 @@ pub async fn issue_to_pr_start(
 ) -> Result<IssueToPrRun, String> {
     let (owner, repo, number) = parse_issue_url(&issue_url)?;
     let repository_slug = format!("{owner}/{repo}");
+    let _start_guard = START_LOCK.lock().await;
     let repository_root = workspace::primary_root_canon(&state)?.to_path_buf();
     let base_ref = m5_delivery::current_branch(&repository_root)?;
 
@@ -683,6 +701,34 @@ pub async fn issue_to_pr_start(
         let _guard = lock_runs()?;
         load_runs_from(&path)?.into_values().collect()
     };
+    // Reattach the authoritative nonterminal run instead of launching
+    // another autonomous agent against its owned Git branch. Verify the
+    // recorded ownership before attaching a root in this desktop process.
+    if let Some(existing) = find_active_issue_run(&existing_runs, &repository_slug, number) {
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(existing.worktree_id.clone())?;
+        if inspection.worktree.marker.repository_slug != existing.repository_slug
+            || inspection.worktree.marker.branch != existing.branch
+        {
+            return Err("Existing issue run worktree ownership differs; refusing duplicate start".to_string());
+        }
+        let label = workspace::add_secondary_workspace_root_impl(
+            state.inner(), inspection.worktree.marker.canonical_path.clone(),
+        )?.label;
+        let _guard = lock_runs()?;
+        let mut current = load_runs_from(&path)?;
+        let mut resumed = require_run(&current, &existing.run_id)?;
+        if !is_terminal(&resumed.status)
+            && resumed.repository_slug == repository_slug
+            && resumed.issue_number == number
+        {
+            resumed.workspace_label = label;
+            resumed.updated_at_ms = now_ms()?;
+            current.insert(resumed.run_id.clone(), resumed.clone());
+            save_runs_to(&path, &current)?;
+            emit_progress(&app, &resumed);
+            return Ok(resumed);
+        }
+    }
     let reusable = find_reusable_worktree(&existing_runs, &repository_slug, number)
         .and_then(|worktree_id| m5_delivery::m5_delivery_inspect_worktree(worktree_id).ok())
         .filter(|inspection| matches!(inspection.worktree.state.as_str(), "active" | "recovered"));
