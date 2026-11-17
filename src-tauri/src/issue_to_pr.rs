@@ -1860,6 +1860,30 @@ mod tests {
     }
 
     #[test]
+    fn daemon_only_reconciles_unrecorded_draft_pr_runs_and_never_replays_creation() {
+        let mut runs = RunMap::new();
+        let mut needs_recovery = fixture_run("owner/repo", 42, 1, "opening_pr");
+        needs_recovery.pr_number = None;
+        let run_id = needs_recovery.run_id.clone();
+        runs.insert(run_id.clone(), needs_recovery);
+        let mut already_tracked = fixture_run("owner/repo", 43, 2, "opening_pr");
+        already_tracked.pr_number = Some(43);
+        runs.insert(already_tracked.run_id.clone(), already_tracked);
+        for (n, status) in ["monitoring_ci", "ready", "cancelled", "failed", "done"].iter().enumerate() {
+            let run = fixture_run("owner/repo", n as u32 + 50, n as u64 + 3, status);
+            runs.insert(run.run_id.clone(), run);
+        }
+        let path = temp_path("reconcile-candidate-restart.json");
+        save_runs_to(&path, &runs).unwrap();
+        let persisted = load_runs_from(&path).unwrap();
+        let candidates = persisted.values()
+            .filter(|run| run.status == "opening_pr" && run.pr_number.is_none())
+            .map(|run| run.run_id.clone()).collect::<Vec<_>>();
+        assert_eq!(candidates, vec![run_id]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn daemon_monitor_selects_only_active_owned_pr_runs_and_fairly_rotates() {
         let mut runs = RunMap::new();
         for index in 1..=16_u64 {
