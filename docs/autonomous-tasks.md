@@ -179,6 +179,7 @@ review-thread resolution.
 ```sh
 node --test scripts/issue-to-pr-ci-acceptance.test.mjs
 cargo test --manifest-path src-tauri/Cargo.toml issue_to_pr --lib
+cargo test --manifest-path src-tauri/Cargo.toml --bin monkey-cli daemon::issue_to_pr_monitor
 pnpm test -- src/store/issueToPrStore.test.ts
 pnpm test
 ```
@@ -189,6 +190,44 @@ in-scope repair, reruns the check, rejects stale/pending simulated GitHub
 check observations, and reaches the `ready` boundary without publishing.
 The fixture exercises production status classification and transition
 checks, not a real provider, a GitHub API connection, or a real model.
+
+### Desktop-closed daemon acceptance
+
+This is a live integration check, not covered by the credential-free Git
+fixture:
+
+1. In the same OS user/profile that runs Little Monkey, authenticate `gh`
+   and run `monkey daemon ensure`; `monkey daemon status --json` must
+   confirm the current installed service is running.
+2. Through the app's existing issue flow, approve commit, push and draft PR.
+   Wait until the persisted run is `monitoring_ci`, then **close the desktop
+   process** without stopping the OS user service.
+3. Finish a GitHub Actions job. The daemon's shared Rust observer should
+   persist a new `ci_history` observation within one 45-second poll cycle
+   (subject to GitHub response time and the eight-run-per-pass cap).
+   Restarting the installed service during that interval must not discard
+   or duplicate observations.
+4. A current-head failed check must move the run to `repairing` (or
+   `failed` once its frozen limit is exhausted) **without** running an
+   agent, consuming a retry attempt, committing, pushing or updating a PR.
+   Reopening the desktop can resume the existing bounded repair.
+5. A current-head stable-green result requires two matching observations
+   at least 30 seconds apart; the daemon may mark `ready` but never
+   publish or merge. Changing the draft PR head, base, ownership, or
+   verified files must revoke readiness.
+6. Disconnect GitHub or make `gh` authentication unavailable while the
+   daemon is running: an existing `ready` status must be revoked to
+   `monitoring_ci` with a persisted transient error. Restore connectivity;
+   it should clear on a subsequent valid observation without consuming a
+   repair attempt.
+7. Engage the daemon kill switch or maintenance drain. No outbound CI
+   poll should occur until the existing daemon control permits it again.
+
+The daemon uses its current-user GitHub CLI authentication. It does **not**
+store GitHub credentials in issue records, create an independent polling
+database, or execute any issue-supplied command. The desktop and daemon
+coordinate the same JSON run record with a stable OS file lock; GitHub
+requests occur outside the critical section and stale responses are dropped.
 
 Live GitHub verification requires the operator's authenticated `gh` account
 and write access to the repo for push/PR mutations; an actual GitHub Actions
