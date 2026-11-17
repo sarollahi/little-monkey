@@ -1978,6 +1978,96 @@ mod tests {
         assert!(!valid_transition("implementing", "ready"));
     }
 
+
+    #[test]
+    fn reviewed_content_survives_one_exact_commit_but_rejects_tampering_or_extra_commits() {
+        let root = temp_path("reviewed-commit-recovery");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| -> String {
+            let result = std::process::Command::new("git").args(args)
+                .current_dir(&root).output().unwrap();
+            assert!(result.status.success(), "{args:?}: {}", String::from_utf8_lossy(&result.stderr));
+            String::from_utf8(result.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(root.join("data.txt"), b"value=1\n").unwrap();
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "baseline"]);
+        let parent = git(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("data.txt"), b"value=2\n").unwrap();
+
+        let root_str = root.to_string_lossy().to_string();
+        let inspection_value = serde_json::json!({
+            "worktree": {
+                "marker": {
+                    "schemaVersion": 1, "worktreeId": "wt-test", "leaseNonce": "lease-1",
+                    "repositoryId": "repo-test", "repositorySlug": "owner/repo",
+                    "repositoryRoot": root_str, "commonGitDir": root.join(".git").to_string_lossy().to_string(),
+                    "canonicalPath": root.to_string_lossy().to_string(),
+                    "branch": "issue-to-pr/fixture", "baseOid": parent,
+                    "policy": {
+                        "allowedRemotes": ["origin"], "branchPrefix": "issue-to-pr/",
+                        "protectedBranches": ["main", "master", "develop"],
+                        "allowPush": true, "allowCreatePullRequest": true,
+                        "allowReviewComment": false, "allowForkWrites": false
+                    }, "createdAtMs": 1
+                },
+                "state": "active", "locked": false, "lockReason": null,
+                "archivePath": null, "createdAtMs": 1, "updatedAtMs": 1
+            },
+            "headOid": parent, "ahead": 0, "behind": 0, "dirty": true,
+            "cleanupBlocked": false,
+            "files": [{
+                "path": "data.txt", "oldPath": null, "indexStatus": " ",
+                "worktreeStatus": "M", "untracked": false, "ignored": false
+            }],
+            "diffs": {
+                "staged": {"text": "", "truncated": false},
+                "unstaged": {"text": "modified data.txt", "truncated": false},
+                "head": {"text": "modified data.txt", "truncated": false}
+            }
+        });
+        let mut inspection: m5_delivery::WorktreeInspection =
+            serde_json::from_value(inspection_value).unwrap();
+        let mut run = fixture_run("owner/repo", 42, 1, "opening_pr");
+        run.review_evidence = Some(ReviewEvidence {
+            revision: inspection_digest(&inspection).unwrap(),
+            files_reviewed: vec!["data.txt".to_string()],
+            summary: "Reviewed modified data.txt".to_string(),
+            observed_at_ms: 1,
+            reviewed_head_oid: parent,
+            reviewed_contents_digest: reviewed_contents_digest(
+                &root, &["data.txt".to_string()],
+            ).unwrap(),
+        });
+        assert!(reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "reviewed uncommitted contents must be valid");
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "approved issue repair"]);
+        inspection.head_oid = git(&["rev-parse", "HEAD"]);
+        inspection.dirty = false;
+        inspection.files.clear();
+        inspection.diffs.staged.text.clear();
+        inspection.diffs.unstaged.text.clear();
+        inspection.diffs.head.text.clear();
+        assert!(reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "exact reviewed contents survive a single approved commit and app restart");
+
+        std::fs::write(root.join("data.txt"), b"value=3\n").unwrap();
+        assert!(!reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "uncommitted tampering after the approved commit must fail");
+        git(&["checkout", "--", "data.txt"]);
+        std::fs::write(root.join("unrelated.txt"), b"new\n").unwrap();
+        git(&["add", "--", "unrelated.txt"]);
+        git(&["commit", "-qm", "unreviewed extra commit"]);
+        inspection.head_oid = git(&["rev-parse", "HEAD"]);
+        assert!(!reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "any additional unreviewed commit invalidates delivery");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Real Git operations and a real subprocess verification command, with
     /// deterministic simulated GitHub check responses. No provider or token
     /// is required for this fixture.
