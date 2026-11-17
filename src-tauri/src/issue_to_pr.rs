@@ -1555,7 +1555,15 @@ fn poll_ci_shared(run_id: &str, notify: impl Fn(&IssueToPrRun)) -> Result<IssueT
         verdict = "pending".to_string();
     }
     let observed_at_ms = now_ms()?;
-    verdict = settled_ci_verdict(&verdict, head_oid, &checks, run.ci_history.last(), observed_at_ms);
+    // A transient outage, changed PR identity or stale SHA clears
+    // ci_head_oid. An old green snapshot cannot count as the first of two
+    // post-recovery observations; re-establish the 30-second settling window.
+    let previous_same_head = if run.ci_head_oid.as_deref() == Some(head_oid) {
+        run.ci_history.last()
+    } else {
+        None
+    };
+    verdict = settled_ci_verdict(&verdict, head_oid, &checks, previous_same_head, observed_at_ms);
     let observation = CiObservation {
         head_oid: head_oid.to_string(),
         verdict: verdict.clone(),
