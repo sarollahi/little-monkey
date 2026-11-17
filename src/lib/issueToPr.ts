@@ -36,8 +36,8 @@ export interface IssueToPrCiObservation {
   verdict: "pending" | "failed" | "passed";
   checks: IssueToPrCiCheck[];
   observedAtMs: number;
-  reviewedHeadOid: string;
-  reviewedContentsDigest: string;
+  reviewedHeadOid?: string;
+  reviewedContentsDigest?: string;
 }
 
 export interface IssueToPrReviewEvidence {
@@ -137,6 +137,9 @@ export const setIssueToPrRepairLimit = (runId: string, maxAttempts: number) =>
 
 export const reconcileIssueToPrPr = (runId: string) =>
   invoke<IssueToPrRun>("issue_to_pr_reconcile_pr", { runId });
+
+export const issueToPrDeliveryRevisionValid = (runId: string) =>
+  invoke<boolean>("issue_to_pr_delivery_revision_valid", { runId });
 
 export const issueToPrWorktreeRevision = (runId: string) =>
   invoke<string>("issue_to_pr_worktree_revision", { runId });
