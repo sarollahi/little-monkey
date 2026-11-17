@@ -1607,8 +1607,9 @@ fn select_monitorable_runs(runs: &RunMap, max: usize) -> Vec<String> {
         .filter(|run| matches!(run.status.as_str(), "monitoring_ci" | "ready")
             && run.pr_number.is_some())
         .collect::<Vec<_>>();
-    // Bounded fair scheduling: every persisted observation updates its time,
-    // so older runs move ahead rather than always polling the first eight.
+    // Bounded fair scheduling: every attempted observation (including repeated
+    // identical network errors) updates its time, so an offline run cannot
+    // monopolize the first eight slots and starve later draft PRs.
     candidates.sort_by(|a, b| (a.updated_at_ms, &a.run_id)
         .cmp(&(b.updated_at_ms, &b.run_id)));
     candidates.into_iter().take(max).map(|run| run.run_id.clone()).collect()
@@ -1636,16 +1637,23 @@ fn revoke_unavailable_ci(run: &mut IssueToPrRun) -> bool {
     true
 }
 
+fn record_monitor_unavailable_at(path: &Path, run_id: &str) -> Result<(), String> {
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(path)?;
+    let mut run = require_run(&runs, run_id)?;
+    if !matches!(run.status.as_str(), "monitoring_ci" | "ready") { return Ok(()); }
+    // Even when the same error is already present, rotate this run to the
+    // back of the durable fair queue. Otherwise eight disconnected PRs can
+    // indefinitely starve every newer one (including across daemon restarts).
+    revoke_unavailable_ci(&mut run);
+    run.updated_at_ms = now_ms()?.max(run.updated_at_ms.saturating_add(1));
+    runs.insert(run.run_id.clone(), run);
+    save_runs_to(path, &runs)
+}
+
 pub fn issue_to_pr_monitor_unavailable(run_id: &str) -> Result<(), String> {
     m5_delivery::validate_id("run id", run_id)?;
-    let _guard = lock_runs()?;
-    let path = runs_path()?;
-    let mut runs = load_runs_from(&path)?;
-    let mut run = require_run(&runs, run_id)?;
-    if !revoke_unavailable_ci(&mut run) { return Ok(()); }
-    run.updated_at_ms = now_ms()?;
-    runs.insert(run.run_id.clone(), run);
-    save_runs_to(&path, &runs)
+    record_monitor_unavailable_at(&runs_path()?, run_id)
 }
 
 /// Returns only a single draft PR on this repository's exact owned branch,
@@ -1725,15 +1733,37 @@ fn reconcile_pr_shared(run_id: &str, notify: impl Fn(&IssueToPrRun)) -> Result<I
 /// Bounded read-only reconciliation candidates for the unattended daemon.
 /// Normal monitoring runs take priority; these require a still-missing PR
 /// number and cannot initiate a GitHub write.
-pub fn issue_to_pr_reconcilable_run_ids(limit: usize) -> Result<Vec<String>, String> {
-    let _guard = lock_runs()?;
-    let path = runs_path()?;
-    let runs = load_runs_from(&path)?;
+fn select_reconcilable_runs(runs: &RunMap, limit: usize) -> Vec<String> {
     let mut candidates = runs.values()
         .filter(|run| run.status == "opening_pr" && run.pr_number.is_none())
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| (a.updated_at_ms, &a.run_id).cmp(&(b.updated_at_ms, &b.run_id)));
-    Ok(candidates.into_iter().take(limit.min(8)).map(|run| run.run_id.clone()).collect())
+    candidates.into_iter().take(limit.min(8)).map(|run| run.run_id.clone()).collect()
+}
+
+pub fn issue_to_pr_reconcilable_run_ids(limit: usize) -> Result<Vec<String>, String> {
+    let _guard = lock_runs()?;
+    Ok(select_reconcilable_runs(&load_runs_from(&runs_path()?)?, limit))
+}
+
+/// Persist an attempted read-only draft-PR reconciliation even when no PR is
+/// found or GitHub is unavailable. This is only a scheduling observation:
+/// no run state, approval, repair budget, or GitHub identity is changed.
+/// Updating the existing run timestamp makes the two-slot daemon scan fair
+/// over multiple passes and preserves that progress across service restarts.
+fn record_reconciliation_probe_at(path: &Path, run_id: &str) -> Result<(), String> {
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(path)?;
+    let mut run = require_run(&runs, run_id)?;
+    if run.status != "opening_pr" || run.pr_number.is_some() { return Ok(()); }
+    run.updated_at_ms = now_ms()?.max(run.updated_at_ms.saturating_add(1));
+    runs.insert(run.run_id.clone(), run);
+    save_runs_to(path, &runs)
+}
+
+pub fn issue_to_pr_reconciliation_observed(run_id: &str) -> Result<(), String> {
+    m5_delivery::validate_id("run id", run_id)?;
+    record_reconciliation_probe_at(&runs_path()?, run_id)
 }
 
 #[tauri::command]
@@ -1880,6 +1910,64 @@ mod tests {
             .filter(|run| run.status == "opening_pr" && run.pr_number.is_none())
             .map(|run| run.run_id.clone()).collect::<Vec<_>>();
         assert_eq!(candidates, vec![run_id]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_unavailable_poll_requeues_identical_errors_without_reviving_terminal_runs() {
+        let path = temp_path("daemon-offline-round-robin.json");
+        let mut runs = RunMap::new();
+        for n in 1..=12_u64 {
+            let mut run = fixture_run("owner/repo", n as u32, n, "monitoring_ci");
+            run.pr_number = Some(n as u32);
+            runs.insert(run.run_id.clone(), run);
+        }
+        save_runs_to(&path, &runs).unwrap();
+        let first = select_monitorable_runs(&load_runs_from(&path).unwrap(), 8);
+        for id in &first {
+            record_monitor_unavailable_at(&path, id).unwrap();
+            // A repeated identical failure still receives a fresh timestamp.
+            record_monitor_unavailable_at(&path, id).unwrap();
+        }
+        let persisted = load_runs_from(&path).unwrap();
+        let second = select_monitorable_runs(&persisted, 8);
+        assert!(second.iter().any(|id| !first.contains(id)),
+            "persistent gh failures must not starve newer draft PRs");
+        for id in &first {
+            let run = &persisted[id];
+            assert_eq!(run.status, "monitoring_ci");
+            assert!(run.ci_head_oid.is_none());
+            assert_eq!(run.error.as_deref(), Some(CI_MONITOR_UNAVAILABLE));
+            assert_eq!(run.repair_attempts, 0);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_unmatched_pr_reconciliation_rotates_durably_across_restart() {
+        let path = temp_path("daemon-reconciliation-fairness.json");
+        let mut runs = RunMap::new();
+        for n in 1..=7_u64 {
+            let run = fixture_run("owner/repo", n as u32, n, "opening_pr");
+            runs.insert(run.run_id.clone(), run);
+        }
+        save_runs_to(&path, &runs).unwrap();
+        let first = select_reconcilable_runs(&load_runs_from(&path).unwrap(), 2);
+        assert_eq!(first, vec!["i2p-1", "i2p-2"]);
+        for id in &first { record_reconciliation_probe_at(&path, id).unwrap(); }
+        // Reopening the ledger simulates a new resident daemon process.
+        let recovered = load_runs_from(&path).unwrap();
+        let second = select_reconcilable_runs(&recovered, 2);
+        assert_eq!(second, vec!["i2p-3", "i2p-4"]);
+        for id in &second { record_reconciliation_probe_at(&path, id).unwrap(); }
+        let third = select_reconcilable_runs(&load_runs_from(&path).unwrap(), 2);
+        assert_eq!(third, vec!["i2p-5", "i2p-6"]);
+        // Already-adopted, cancelled or otherwise changed runs must be left untouched.
+        let mut changed = load_runs_from(&path).unwrap();
+        changed.get_mut("i2p-7").unwrap().status = "cancelled".to_string();
+        save_runs_to(&path, &changed).unwrap();
+        record_reconciliation_probe_at(&path, "i2p-7").unwrap();
+        assert_eq!(load_runs_from(&path).unwrap()["i2p-7"], changed["i2p-7"]);
         std::fs::remove_file(path).unwrap();
     }
 

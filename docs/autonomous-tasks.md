@@ -231,6 +231,13 @@ fixture:
 8. Engage the daemon kill switch or maintenance drain. No outbound CI
    poll should occur until the existing daemon control permits it again.
 
+The two bounded queues rotate durably by refreshing a run's last-attempt
+timestamp even when a draft PR was not yet found or repeated authentication
+failures are identical; two stuck recoveries or eight offline CI runs cannot
+permanently starve newer runs, including after daemon restart. Kill switch,
+maintenance drain and active-profile checks are repeated between outbound
+requests (a request already in flight may still complete).
+
 The daemon uses its current-user GitHub CLI authentication and is
 **pinned to the active app-data profile it served at startup**. Switching
 profiles requires re-ensuring the corresponding user service; an old

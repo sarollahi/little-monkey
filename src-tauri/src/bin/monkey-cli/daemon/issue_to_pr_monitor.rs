@@ -38,7 +38,7 @@ fn daemon_ci_poll_paused(paths: &DaemonPaths) -> Result<bool, String> {
         || meta("maintenance_drain")?.as_deref() == Some("1"))
 }
 
-fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
+fn daemon_ci_poll_allowed(paths: &DaemonPaths) -> Result<bool, String> {
     // The resident service belongs to the profile chosen when it started.
     // If the active profile changes underneath it, do not accidentally poll
     // another profile's draft PRs using this stale daemon identity.
@@ -49,12 +49,19 @@ fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
     }
     // Respect the already-authoritative resident daemon pause/stop controls,
     // using only a read-only SQLite connection to existing service state.
-    if daemon_ci_poll_paused(paths)? { return Ok(()); }
+    Ok(!daemon_ci_poll_paused(paths)?)
+}
+
+fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
+    if !daemon_ci_poll_allowed(paths)? { return Ok(()); }
     // An approved draft PR may already exist remotely when the desktop
     // closes between GitHub success and persisting the PR number. Read-only
     // reconciliation adopts only the exact owned, reviewed branch/HEAD.
     // Never retry the original create mutation or guess a PR identity.
     for run_id in issue_to_pr::issue_to_pr_reconcilable_run_ids(MAX_RECOVERIES_PER_PASS)? {
+        // A drain/kill switch or profile change during a long GitHub request
+        // must suppress subsequent requests in this same bounded pass.
+        if !daemon_ci_poll_allowed(paths)? { return Ok(()); }
         match issue_to_pr::issue_to_pr_reconcile_pr_headless(&run_id) {
             Ok(run) if run.status == "monitoring_ci" => {
                 eprintln!("monkey daemon: recovered existing owned draft PR for issue-to-pr {}", run_id);
@@ -64,9 +71,12 @@ fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
                 eprintln!("monkey daemon: issue-to-pr {} draft reconciliation unavailable: {error}", run_id);
             }
         }
+        // Even missing PRs and failed lookups must yield their queue slot.
+        issue_to_pr::issue_to_pr_reconciliation_observed(&run_id)?;
     }
     let ids = issue_to_pr::issue_to_pr_monitorable_run_ids(MAX_RUNS_PER_PASS)?;
     for run_id in ids {
+        if !daemon_ci_poll_allowed(paths)? { return Ok(()); }
         // All GitHub calls are read-only, authenticated gh invocations in the
         // existing m5_delivery subsystem. A concurrent desktop update wins
         // over any stale response by comparing the persisted run snapshot.
