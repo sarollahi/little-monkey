@@ -13,11 +13,20 @@
 use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
 use little_monkey_lib::issue_to_pr;
+use super::store::{DaemonPaths, DaemonStore};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(45);
 const MAX_RUNS_PER_PASS: usize = 8;
 
-fn observe_due_once() -> Result<(), String> {
+fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
+    // Reuse the existing daemon's global pause/stop controls. Maintenance
+    // drain and the kill switch must also suppress read-only outbound GitHub
+    // checks, even though they do not consume an agent queue slot.
+    let store = DaemonStore::open(paths)?;
+    if store.kill_switch()? || store.get_meta("maintenance_drain")?.as_deref() == Some("1") {
+        return Ok(());
+    }
+    drop(store);
     let ids = issue_to_pr::issue_to_pr_monitorable_run_ids(MAX_RUNS_PER_PASS)?;
     for run_id in ids {
         // All GitHub calls are read-only, authenticated gh invocations in the
@@ -48,7 +57,7 @@ fn observe_due_once() -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn spawn() {
+pub(super) fn spawn(paths: DaemonPaths) {
     tokio::spawn(async move {
         let mut ticker = interval(POLL_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -56,7 +65,8 @@ pub(super) fn spawn() {
             ticker.tick().await;
             // gh and worktree verification are synchronous and potentially
             // slow. Never block the resident daemon's queue/heartbeat tick.
-            match tokio::task::spawn_blocking(observe_due_once).await {
+            let worker_paths = paths.clone();
+            match tokio::task::spawn_blocking(move || observe_due_once(&worker_paths)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     eprintln!("monkey daemon: issue-to-pr CI monitor paused: {error}");
