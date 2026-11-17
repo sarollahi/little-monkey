@@ -416,6 +416,28 @@ describe("issueToPrStore", () => {
     expect(runner.runIssueToPrAgent).not.toHaveBeenCalled();
   });
 
+  it("desktop reopening resumes the persisted repair state observed by daemon without re-running issue intake", async () => {
+    const run = fixtureRun({
+      status: "repairing",
+      prNumber: 42,
+      repairAttempts: 1,
+      repairInProgress: true,
+    });
+    api.listIssueToPrRuns.mockResolvedValue([run]);
+    api.getIssueToPrStatus
+      .mockResolvedValueOnce(run)
+      .mockResolvedValue(fixtureRun({ ...run, status: "opening_pr" }));
+    runner.runIssueToPrAgent.mockResolvedValue({
+      outcome: "cancelled",
+      summary: "Stopped after observing restored coordinator state.",
+      durableRunId: null,
+    });
+    await useIssueToPrStore.getState().init();
+    await flush(20);
+    expect(api.beginIssueToPrRepair).toHaveBeenCalledWith(run.runId);
+    expect(api.startIssueToPr).not.toHaveBeenCalled();
+  });
+
   it("init never re-drives a run that already has an in-flight controller tracked for it", async () => {
     const run = fixtureRun({ status: "implementing" });
     api.startIssueToPr.mockResolvedValue(run);
