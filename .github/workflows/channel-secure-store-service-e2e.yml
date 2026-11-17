@@ -216,7 +216,11 @@ jobs:
       - name: Telegram inbound -> agent run -> outbound reply
         shell: bash
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml --bin monkey-cli \
+          # Real CLI already built for the installed-service acceptance step.
+          # Never let the copied Tauri build-out harness guess its own path.
+          cli="$(pwd)/src-tauri/target/debug/monkey-cli"
+          "$cli" --version
+          LM_CHANNEL_E2E_CLI="$cli" cargo test --manifest-path src-tauri/Cargo.toml --bin monkey-cli \
             daemon::channel_agent_e2e::a_telegram_message_becomes_an_agent_reply_end_to_end \
             -- --exact --nocapture --test-threads=1
 
