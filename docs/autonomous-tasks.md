@@ -184,7 +184,12 @@ Live GitHub verification requires the operator's authenticated `gh` account
 and write access to the repo for push/PR mutations; an actual GitHub Actions
 run for the new draft PR is the authoritative remote acceptance test.
 Monitoring starts from the primary desktop's boot lifecycle even if the
-Issue-to-PR panel is never opened. Restarting a run stopped during implementation checks the authoritative
+Issue-to-PR panel is never opened. Starting the same GitHub issue again while it already has a nonterminal
+run reattaches the recorded run and its owned worktree instead of creating
+a duplicate agent or resetting frozen budgets. Concurrent Start requests
+are serialized before worktree creation.
+
+Restarting a run stopped during implementation checks the authoritative
 owned-worktree identity and actual changed files before doing anything.
 A partially edited branch proceeds to fresh authoritative checks and
 independent review instead of replaying code mutations; an untouched branch
