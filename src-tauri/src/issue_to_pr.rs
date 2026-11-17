@@ -2006,7 +2006,7 @@ mod tests {
                     "repositoryId": "repo-test", "repositorySlug": "owner/repo",
                     "repositoryRoot": root_str, "commonGitDir": root.join(".git").to_string_lossy().to_string(),
                     "canonicalPath": root.to_string_lossy().to_string(),
-                    "branch": "issue-to-pr/fixture", "baseOid": parent,
+                    "branch": "issue-to-pr/fixture", "baseOid": parent.clone(),
                     "policy": {
                         "allowedRemotes": ["origin"], "branchPrefix": "issue-to-pr/",
                         "protectedBranches": ["main", "master", "develop"],
@@ -2017,7 +2017,7 @@ mod tests {
                 "state": "active", "locked": false, "lockReason": null,
                 "archivePath": null, "createdAtMs": 1, "updatedAtMs": 1
             },
-            "headOid": parent, "ahead": 0, "behind": 0, "dirty": true,
+            "headOid": parent.clone(), "ahead": 0, "behind": 0, "dirty": true,
             "cleanupBlocked": false,
             "files": [{
                 "path": "data.txt", "oldPath": null, "indexStatus": " ",
