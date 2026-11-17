@@ -1830,7 +1830,7 @@ mod tests {
         let mut ready = fixture_run("owner/repo", 50, 0, "ready");
         ready.pr_number = Some(50);
         runs.insert(ready.run_id.clone(), ready);
-        let mut no_pr = fixture_run("owner/repo", 51, 0, "monitoring_ci");
+        let mut no_pr = fixture_run("owner/repo", 51, 200, "monitoring_ci");
         no_pr.pr_number = None;
         runs.insert(no_pr.run_id.clone(), no_pr);
         for (index, status) in ["cancelled", "done", "failed", "repairing", "opening_pr"].iter().enumerate() {
@@ -1842,7 +1842,7 @@ mod tests {
         assert_eq!(first.len(), 8);
         assert_eq!(first[0], "i2p-0", "ready runs still need current-head CI monitoring");
         assert!(!first.contains(&"i2p-70".to_string()));
-        assert!(!first.contains(&"i2p-51".to_string()));
+        assert!(!first.contains(&"i2p-200".to_string()));
         assert!(first.contains(&"i2p-1".to_string()));
         // Durable observation timestamp moves already-observed runs behind
         // older pending ones, including after a daemon restart.
