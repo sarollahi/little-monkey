@@ -109,13 +109,14 @@ pub(super) fn cli_beside_test_binary(_current: &Path) -> Option<PathBuf> {
 /// harness answers `--list` with its test names, and the CLI refuses the flag.
 /// One exec per candidate, once per test run.
 fn cargo_profile_of_test_binary(current: &Path) -> Option<PathBuf> {
+    // The test launcher may be a copied Tauri sidecar in build/*/out,
+    // a libtest under deps/, or an external runner mounting the binary
+    // without the sibling deps directory. Profile naming is stable even
+    // when that directory is absent.
     current.ancestors()
-        .find(|dir| {
-            dir.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == "debug" || name == "release")
-                && dir.join("deps").is_dir()
-        })
+        .find(|dir| dir.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "debug" || name == "release"))
         .map(Path::to_path_buf)
 }
 
@@ -127,7 +128,9 @@ fn finds_cli_profile_from_both_regular_deps_and_tauri_sidecar_out_dir() {
         uuid::Uuid::new_v4().simple()
     ));
     let profile = root.join("target").join("debug");
-    std::fs::create_dir_all(profile.join("deps")).expect("create deps");
+    // No deps directory on purpose: a copied Tauri harness can run without
+    // its build root attached and must still identify the Cargo profile.
+    std::fs::create_dir_all(&profile).expect("create profile");
     std::fs::create_dir_all(profile.join("build").join("little-monkey").join("hash").join("out"))
         .expect("create Tauri build out");
     let normal = profile.join("deps").join("monkey_cli-hash");
@@ -144,8 +147,24 @@ fn locate_cli_binary() -> PathBuf {
     // running from that copied harness, not target/<profile>/deps. Ascend to
     // the real Cargo profile directory rather than assuming the immediate
     // parent is deps (which made five daemon E2Es fail on all OSes).
+    // Prefer an explicitly provided real executable (GitHub CI and
+    // installed-service harnesses supply it). Verify the executable's
+    // identity instead of treating a path supplied by the environment as
+    // inherently trusted.
+    if let Some(explicit) = std::env::var_os(CLI_ENV).map(PathBuf::from) {
+        if is_the_cli(&explicit) { return explicit; }
+    }
     let profile = cargo_profile_of_test_binary(&current)
-        .expect("find Cargo debug/release profile enclosing the test binary");
+        .unwrap_or_else(|| {
+            // Tauri build artifacts sometimes run outside Cargo's profile
+            // hierarchy. The source manifest remains stable at compile time.
+            // Cargo's explicit target directory, when configured, wins.
+            let target = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+            let profile_name = if cfg!(debug_assertions) { "debug" } else { "release" };
+            target.join(profile_name)
+        });
     let deps = profile.join("deps");
     let name = if cfg!(windows) {
         "monkey-cli.exe"
@@ -154,7 +173,9 @@ fn locate_cli_binary() -> PathBuf {
     };
 
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&deps)
-        .expect("read deps")
+        .ok()
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
