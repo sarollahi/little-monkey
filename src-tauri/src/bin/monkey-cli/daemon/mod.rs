@@ -3413,7 +3413,7 @@ async fn serve(cli: &crate::Cli) -> Result<(), String> {
     // Reuse the desktop's authoritative GitHub CI observer inside this
     // resident OS service. Read-only polling continues after the WebView
     // closes and rediscovers pending draft PRs on every daemon restart.
-    issue_to_pr_monitor::spawn();
+    issue_to_pr_monitor::spawn(paths.clone());
     // Call limits. Separate from the channel runtime because it enforces
     // deadlines rather than moving messages: a call nobody is watching keeps
     // costing money whether or not any provider is polling.
