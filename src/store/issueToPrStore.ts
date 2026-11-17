@@ -86,6 +86,14 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
       void (async () => {
         try {
           const latest = await api.getIssueToPrStatus(runId);
+          const known = get().runs.find((run) => run.runId === runId);
+          // The resident OS daemon writes the SAME persisted record without
+          // an in-process Tauri event. Detect its transitions even while the
+          // desktop happens to be open; a daemon-observed failure must start
+          // the existing bounded repair rather than leaving a stale UI.
+          if (!known || known.updatedAtMs !== latest.updatedAtMs || known.status !== latest.status) {
+            onProgress(latest);
+          }
           if (latest.status !== "monitoring_ci" && latest.status !== "ready") return;
           onProgress(await api.pollIssueToPrCi(runId));
         } catch (error) {
