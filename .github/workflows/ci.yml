@@ -439,6 +439,7 @@ jobs:
             # otherwise replace the already-linked CLI during cargo test.
             node scripts/ensure-cli-sidecar-placeholder.mjs
             src-tauri/target/debug/monkey-cli --version
+            export LM_CHANNEL_E2E_CLI="$(pwd)/src-tauri/target/debug/monkey-cli"
             RUST_TEST_THREADS=1 pnpm test:rust
             # Three ACTUAL independently running daemon installations over
             # signed/pinned TLS on loopback, private SQLite and OS keychain.
@@ -462,9 +463,14 @@ jobs:
           node scripts/ensure-cli-sidecar-placeholder.mjs
           if [ "$RUNNER_OS" = "Windows" ]; then
             src-tauri/target/debug/monkey-cli.exe --version
+            cli="$(node -p 'require("path").resolve("src-tauri/target/debug/monkey-cli.exe")')"
           else
             src-tauri/target/debug/monkey-cli --version
+            cli="$(pwd)/src-tauri/target/debug/monkey-cli"
           fi
+          # Test harnesses may be copied by Tauri into arbitrary directories.
+          # Record the exact verified real executable, never a libtest harness.
+          echo "LM_CHANNEL_E2E_CLI=$cli" >> "$GITHUB_ENV"
 
       - name: Rust tests
         if: ${{ !startsWith(matrix.os, 'ubuntu') }}
