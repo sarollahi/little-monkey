@@ -1737,6 +1737,21 @@ mod tests {
     }
 
     #[test]
+    fn issue_start_deduplicates_only_the_latest_nonterminal_run_for_same_issue() {
+        let done = fixture_run("owner/repo", 42, 10, "done");
+        let earlier = fixture_run("owner/repo", 42, 20, "checking");
+        let latest = fixture_run("owner/repo", 42, 30, "monitoring_ci");
+        let different_repo = fixture_run("elsewhere/repo", 42, 40, "implementing");
+        let different_issue = fixture_run("owner/repo", 43, 50, "implementing");
+        let runs = vec![done, earlier, latest.clone(), different_repo, different_issue];
+        assert_eq!(find_active_issue_run(&runs, "OWNER/REPO", 42).map(|r| &r.run_id),
+            Some(&latest.run_id));
+        assert!(find_active_issue_run(&runs, "owner/repo", 99).is_none());
+        assert!(find_active_issue_run(&runs, "unrelated/repo", 42).is_none());
+        assert!(find_active_issue_run(&[fixture_run("owner/repo", 42, 10, "done")], "owner/repo", 42).is_none());
+    }
+
+    #[test]
     fn parse_issue_url_accepts_a_well_formed_github_issue_url_and_lowercases_owner_repo() {
         assert_eq!(
             parse_issue_url("https://github.com/Owner/Repo/issues/42").unwrap(),
