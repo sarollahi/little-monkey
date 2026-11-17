@@ -1465,6 +1465,43 @@ mod tests {
     }
 
     #[test]
+    fn untracked_file_contents_are_part_of_verified_revision_even_when_size_is_unchanged() {
+        let root = std::env::temp_dir().join(format!("lm-i2p-untracked-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let init = std::process::Command::new("git").arg("-C").arg(&root)
+            .args(["init", "-q"]).status().unwrap();
+        assert!(init.success(), "real Git fixture must initialize");
+        let file = root.join("nested").join("feature.ts");
+        std::fs::write(&file, b"enabled=false\n").unwrap();
+        let fingerprint = || {
+            let mut hash = Sha256::new();
+            hash_untracked_contents(&root, &mut hash).unwrap();
+            format!("{:x}", hash.finalize())
+        };
+        let before = fingerprint();
+        std::fs::write(&file, b"enabled=true \n").unwrap();
+        let after = fingerprint();
+        assert_ne!(before, after, "untracked byte changes must invalidate check/review evidence");
+        assert_eq!(after, fingerprint(), "unchanged untracked bytes must be stable");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_symlink_cannot_smuggle_outside_file_into_review_fingerprint() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("lm-i2p-untracked-link-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&root)
+            .args(["init", "-q"]).status().unwrap().success());
+        symlink("/etc/hosts", root.join("outside-link")).unwrap();
+        let mut hasher = Sha256::new();
+        let result = hash_untracked_contents(&root, &mut hasher);
+        assert!(result.is_err(), "untracked symlink must fail closed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parse_issue_url_accepts_a_well_formed_github_issue_url_and_lowercases_owner_repo() {
         assert_eq!(
             parse_issue_url("https://github.com/Owner/Repo/issues/42").unwrap(),
