@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::io::Read;
+use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -478,22 +478,36 @@ fn runs_path() -> Result<PathBuf, String> {
     Ok(dir.join(RUNS_FILE))
 }
 
-fn load_runs_from(path: &Path) -> RunMap {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return RunMap::new();
+fn load_runs_from(path: &Path) -> Result<RunMap, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(RunMap::new()),
+        Err(error) => return Err(format!("Cannot read durable issue run store: {error}")),
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    // Never turn malformed data into an empty map and later overwrite it.
+    // A corrupt or interrupted checkpoint must remain available for repair.
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("Durable issue run store is corrupt; refusing to overwrite: {error}"))
 }
 
 fn save_runs_to(path: &Path, runs: &RunMap) -> Result<(), String> {
     let json = serde_json::to_string_pretty(runs)
         .map_err(|error| format!("Failed to serialize issue-to-pr runs: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)
-        .map_err(|error| format!("Failed to write issue-to-pr runs: {error}"))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|error| format!("Failed to finalize issue-to-pr runs: {error}"))?;
-    Ok(())
+    // Separate writers must never share a fixed .tmp path. The owning
+    // transaction lock coordinates in-process read/modify/write operations.
+    let tmp = path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
+    let outcome = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .open(&tmp).map_err(|error| format!("Failed to create issue run checkpoint: {error}"))?;
+        file.write_all(json.as_bytes())
+            .map_err(|error| format!("Failed to write issue run checkpoint: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("Failed to sync issue run checkpoint: {error}"))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|error| format!("Failed to finalize issue run checkpoint: {error}"))
+    })();
+    if outcome.is_err() { let _ = std::fs::remove_file(&tmp); }
+    outcome
 }
 
 fn emit_progress(app: &AppHandle, run: &IssueToPrRun) {
@@ -545,7 +559,7 @@ pub async fn issue_to_pr_start(
     }
 
     let path = runs_path()?;
-    let existing_runs: Vec<IssueToPrRun> = load_runs_from(&path).into_values().collect();
+    let existing_runs: Vec<IssueToPrRun> = load_runs_from(&path)?.into_values().collect();
     let reusable = find_reusable_worktree(&existing_runs, &repository_slug, number)
         .and_then(|worktree_id| m5_delivery::m5_delivery_inspect_worktree(worktree_id).ok())
         .filter(|inspection| matches!(inspection.worktree.state.as_str(), "active" | "recovered"));
@@ -629,7 +643,7 @@ pub async fn issue_to_pr_start(
         updated_at_ms: now,
     };
 
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     runs.insert(run.run_id.clone(), run.clone());
     prune(&mut runs);
     save_runs_to(&path, &runs)?;
@@ -697,7 +711,7 @@ pub fn issue_to_pr_advance(
         return Err(format!("Unknown issue-to-pr status '{status}'"));
     }
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if status == "ready" {
         // Only issue_to_pr_poll_ci may establish readiness after consulting
@@ -822,7 +836,7 @@ pub async fn issue_to_pr_run_checks(
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
 
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if !valid_transition(&run.status, "checking") {
         return Err(format!(
@@ -905,7 +919,7 @@ pub async fn issue_to_pr_run_checks(
         });
     }
 
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if !is_current_verification(&run, generation) {
         // Cancellation or a newer verifier took ownership during the
@@ -942,7 +956,7 @@ pub async fn issue_to_pr_run_checks(
 #[tauri::command]
 pub fn issue_to_pr_worktree_revision(run_id: String) -> Result<String, String> {
     m5_delivery::validate_id("run id", &run_id)?;
-    let run = require_run(&load_runs_from(&runs_path()?), &run_id)?;
+    let run = require_run(&load_runs_from(&runs_path()?)?, &run_id)?;
     let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id)?;
     inspection_digest(&inspection)
 }
@@ -964,7 +978,7 @@ pub fn issue_to_pr_record_review(
         return Err("Invalid independent review revision or file coverage".to_string());
     }
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if run.status != "checking" || run.verification_in_progress || run.checks.is_empty()
         || !run.checks.iter().all(|check| check.passed && check.code == Some(0))
@@ -1088,7 +1102,7 @@ pub fn issue_to_pr_set_repair_limit(
         return Err("Repair limit must be between 0 and 5".to_string());
     }
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if run.status != "planning" || run.repair_attempts != 0 {
         return Err("Repair policy is frozen after planning".to_string());
@@ -1117,7 +1131,7 @@ pub fn issue_to_pr_set_execution_budget(
         return Err("Total token budget must be between 10000 and 2000000".to_string());
     }
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if run.status != "planning" || run.tokens_used > 0 || run.repair_attempts > 0 {
         return Err("Agent budgets are frozen once execution has started".to_string());
@@ -1149,7 +1163,7 @@ pub fn issue_to_pr_charge_tokens(
         return Err("Unreasonable token accounting event rejected".to_string());
     }
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if run.usage_event_ids.iter().any(|id| id == &usage_id) {
         return Ok(run);
@@ -1188,7 +1202,7 @@ pub fn issue_to_pr_charge_tokens(
 pub fn issue_to_pr_begin_repair(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if run.status != "repairing" {
         return Err("Only a run with failed verification may begin repair".to_string());
@@ -1214,7 +1228,7 @@ pub fn issue_to_pr_begin_repair(app: AppHandle, run_id: String) -> Result<IssueT
 pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if run.status != "monitoring_ci" && run.status != "ready" {
         return Err("CI monitoring requires an owned draft PR awaiting checks".to_string());
@@ -1356,7 +1370,7 @@ fn find_matching_owned_draft_pr(
 pub fn issue_to_pr_reconcile_pr(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if run.status != "opening_pr" || run.pr_number.is_some() { return Ok(run); }
     let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
@@ -1383,7 +1397,7 @@ pub fn issue_to_pr_reconcile_pr(app: AppHandle, run_id: String) -> Result<IssueT
 pub fn issue_to_pr_cancel(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if is_terminal(&run.status) {
         return Ok(run);
@@ -1400,13 +1414,13 @@ pub fn issue_to_pr_cancel(app: AppHandle, run_id: String) -> Result<IssueToPrRun
 pub fn issue_to_pr_status(run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
-    require_run(&load_runs_from(&path), &run_id)
+    require_run(&load_runs_from(&path)?, &run_id)
 }
 
 #[tauri::command]
 pub fn issue_to_pr_list() -> Result<Vec<IssueToPrRun>, String> {
     let path = runs_path()?;
-    let mut runs: Vec<IssueToPrRun> = load_runs_from(&path).into_values().collect();
+    let mut runs: Vec<IssueToPrRun> = load_runs_from(&path)?.into_values().collect();
     runs.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
     Ok(runs)
 }
@@ -1769,7 +1783,7 @@ mod tests {
         let mut store = RunMap::new();
         store.insert(run.run_id.clone(), run.clone());
         save_runs_to(&path, &store).unwrap();
-        let recovered = load_runs_from(&path);
+        let recovered = load_runs_from(&path).unwrap();
         assert_eq!(recovered.get(&run.run_id), Some(&run));
         assert_eq!(recovered[&run.run_id].max_repair_attempts, 2);
         let _ = std::fs::remove_file(path);
@@ -1868,19 +1882,20 @@ mod tests {
         runs.insert(run.run_id.clone(), run.clone());
         save_runs_to(&path, &runs).unwrap();
 
-        let loaded = load_runs_from(&path);
+        let loaded = load_runs_from(&path).unwrap();
         assert_eq!(loaded.get(&run.run_id), Some(&run));
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn load_missing_or_corrupt_file_degrades_to_an_empty_map_instead_of_erroring() {
+    fn missing_store_is_empty_but_corrupt_store_fails_closed_and_preserves_bytes() {
         let path = temp_path("missing.json");
-        assert!(load_runs_from(&path).is_empty());
+        assert!(load_runs_from(&path).unwrap().is_empty());
 
         std::fs::write(&path, "not json").unwrap();
-        assert!(load_runs_from(&path).is_empty());
+        assert!(load_runs_from(&path).unwrap_err().contains("corrupt"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
         let _ = std::fs::remove_file(&path);
     }
 
