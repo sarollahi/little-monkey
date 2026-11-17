@@ -110,7 +110,12 @@ from the issue panel/run ledger.
 
 Git delivery is deliberately not autonomous: the issue coordinator
 completes the local verified worktree and hands it to exactly one native
-`m5_delivery` approval flow. Each owned-worktree commit, push, and draft
+`m5_delivery` approval flow. A restart between an approved commit and the
+push is recoverable: the backend confirms the clean HEAD is **exactly one**
+commit on top of the reviewed HEAD, that the commit touched **only the
+reviewed file list**, and that current file bytes/permissions still match
+the recorded precommit content snapshot. Any extra commit, changed content,
+unreviewed path, or stale preview is rejected without a push. Each owned-worktree commit, push, and draft
 PR creation/update requires a separately previewed, typed confirmation. Edits on a previously pushed draft PR are
 committed on the same owned branch and the existing PR is updated, never
 replaced or force-pushed. An ambiguous Git state fails closed.
