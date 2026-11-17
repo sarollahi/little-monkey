@@ -20,7 +20,7 @@ import {
   type DeliveryMutation,
 } from "../../lib/gitDelivery";
 import type { IssueToPrRun, IssueToPrStatus } from "../../lib/issueToPr";
-import { issueToPrWorktreeRevision } from "../../lib/issueToPr";
+import { issueToPrDeliveryRevisionValid } from "../../lib/issueToPr";
 import { isTerminalIssueToPrStatus } from "../../lib/issueToPr";
 import { isSpecTooVague, SPEC_DIMENSIONS } from "../../lib/specScorer";
 import { useT } from "../../lib/i18n";
@@ -91,8 +91,8 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
       if (!run.checks.length || run.checks.some((check) => !check.passed || check.code !== 0)) {
         throw new Error("Authoritative repository tests must pass before GitHub delivery.");
       }
-      if (!run.reviewEvidence || run.reviewEvidence.revision !== await issueToPrWorktreeRevision(run.runId)) {
-        throw new Error("The independent review is absent or stale for this owned diff. Reverify before delivery.");
+      if (!run.reviewEvidence || !await issueToPrDeliveryRevisionValid(run.runId)) {
+        throw new Error("The owned diff or committed content no longer matches independent review. Reverify before delivery.");
       }
       const inspection = await inspectOwnedWorktree(run.worktreeId);
       if (inspection.worktree.marker.repositorySlug !== run.repositorySlug
@@ -115,6 +115,13 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
     setBusy(true);
     setError(null);
     try {
+      // Confirmations remain tied to the actual reviewed bytes even if a
+      // file changes after the user sees the preview. A previously reviewed
+      // commit can resume after a restart only when the native backend proves
+      // one exact commit with the same file set and contents.
+      if (!await issueToPrDeliveryRevisionValid(run.runId)) {
+        throw new Error("Reviewed worktree changed after preview; reverify before any Git side effect.");
+      }
       const result = await executeDeliveryMutation(pendingMutation, preview.digest, confirmation) as {
         number?: number; url?: string;
       };
