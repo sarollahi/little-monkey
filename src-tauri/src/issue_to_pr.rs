@@ -1683,30 +1683,57 @@ fn find_matching_owned_draft_pr(
 /// Read-only GitHub discovery; never creates, pushes, merges or changes PRs.
 #[tauri::command]
 pub fn issue_to_pr_reconcile_pr(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
-    m5_delivery::validate_id("run id", &run_id)?;
+    reconcile_pr_shared(&run_id, |run| emit_progress(&app, run))
+}
+
+/// Recover a draft PR already created through approved delivery when the
+/// desktop disappeared before recording its identity. Daemon and desktop use
+/// the identical read-only check; neither creates another PR.
+pub fn issue_to_pr_reconcile_pr_headless(run_id: &str) -> Result<IssueToPrRun, String> {
+    reconcile_pr_shared(run_id, |_| {})
+}
+
+fn reconcile_pr_shared(run_id: &str, notify: impl Fn(&IssueToPrRun)) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", run_id)?;
+    let path = runs_path()?;
+    let baseline = {
+        let _guard = lock_runs()?;
+        require_run(&load_runs_from(&path)?, run_id)?
+    };
+    if baseline.status != "opening_pr" || baseline.pr_number.is_some() { return Ok(baseline); }
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(baseline.worktree_id.clone())?;
+    if inspection.dirty || inspection.worktree.marker.repository_slug != baseline.repository_slug
+        || inspection.worktree.marker.branch != baseline.branch
+        || !reviewed_delivery_state_matches(&baseline, &inspection)?
+    {
+        return Ok(baseline); // No unreviewed/dirty branch can enter CI monitoring.
+    }
+    let endpoint = format!("repos/{}/pulls?state=open&per_page=100", baseline.repository_slug);
+    let entries = m5_delivery::m5_github_api_get_paginated(&endpoint, 400)?;
+    if let Some((number, url)) = find_matching_owned_draft_pr(&entries, &baseline, &inspection.head_oid)? {
+        let mut update = baseline.clone();
+        update.pr_number = Some(number);
+        update.pr_url = Some(url);
+        update.status = "monitoring_ci".to_string();
+        // This CAS drops a stale remote response when the desktop cancelled,
+        // pushed a different commit or already adopted the PR meanwhile.
+        return persist_ci_update(&path, &baseline, update, &notify);
+    }
+    Ok(baseline)
+}
+
+/// Bounded read-only reconciliation candidates for the unattended daemon.
+/// Normal monitoring runs take priority; these require a still-missing PR
+/// number and cannot initiate a GitHub write.
+pub fn issue_to_pr_reconcilable_run_ids(limit: usize) -> Result<Vec<String>, String> {
     let _guard = lock_runs()?;
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path)?;
-    let mut run = require_run(&runs, &run_id)?;
-    if run.status != "opening_pr" || run.pr_number.is_some() { return Ok(run); }
-    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
-    if inspection.dirty || inspection.worktree.marker.repository_slug != run.repository_slug
-        || inspection.worktree.marker.branch != run.branch
-    {
-        return Ok(run); // Uncommitted or non-owned work cannot prove a remote PR identity.
-    }
-    let endpoint = format!("repos/{}/pulls?state=open&per_page=100", run.repository_slug);
-    let entries = m5_delivery::m5_github_api_get_paginated(&endpoint, 400)?;
-    if let Some((number, url)) = find_matching_owned_draft_pr(&entries, &run, &inspection.head_oid)? {
-        run.pr_number = Some(number);
-        run.pr_url = Some(url);
-        run.status = "monitoring_ci".to_string();
-        run.updated_at_ms = now_ms()?;
-        runs.insert(run.run_id.clone(), run.clone());
-        save_runs_to(&path, &runs)?;
-        emit_progress(&app, &run);
-    }
-    Ok(run)
+    let runs = load_runs_from(&path)?;
+    let mut candidates = runs.values()
+        .filter(|run| run.status == "opening_pr" && run.pr_number.is_none())
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| (a.updated_at_ms, &a.run_id).cmp(&(b.updated_at_ms, &b.run_id)));
+    Ok(candidates.into_iter().take(limit.min(8)).map(|run| run.run_id.clone()).collect())
 }
 
 #[tauri::command]
