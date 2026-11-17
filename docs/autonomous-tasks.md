@@ -121,7 +121,15 @@ committed on the same owned branch and the existing PR is updated, never
 replaced or force-pushed. An ambiguous Git state fails closed.
 
 After the operator approves delivery, the panel polls GitHub's real
-`statusCheckRollup` every 30 seconds. Observations are persisted by exact
+`statusCheckRollup` every 30 seconds. **Independently, the installed
+`monkey daemon` user service now polls the same authoritative Rust
+observer every 45 seconds**, including when the desktop process is closed.
+The daemon discovers `monitoring_ci` and `ready` runs on each startup and
+checks up to eight oldest-unobserved runs per pass; it performs no network
+work if no run is waiting. Both use the same persisted evidence, GitHub
+authentication, owned branch checks, revision-bound review, and CI settling
+rule. Unavailable GitHub/network/auth responses revoke `ready` without
+consuming a model repair attempt; polling retries on the next pass. Observations are persisted by exact
 PR head commit, deduplicated against repeated polls, and exposed in the
 nine-stage timeline. A green CI rollup must remain unchanged across two
 observations at least 30 seconds apart before it can become Ready; another
@@ -140,11 +148,13 @@ repair. Each model response is charged before tools execute; providers without
 metered token usage fail closed. Token-event idempotency survives app restarts. The persisted JSON run store
 now rejects malformed data rather than loading an empty map and erasing
 unfinished runs on its next write. Checkpoints use individually named
-sync-to-disk temporary files before replacement. Complete in-process
-read/modify/write operations are serialized, so CI events cannot race with
-token charging, cancellation or a finished verification subprocess. A
-separate process must not write that desktop-owned store without a
-cross-process transaction protocol; daemon-only polling remains out of scope.
+sync-to-disk temporary files before replacement. Desktop and daemon now
+serialize whole-record read/modify/write operations using the same
+cross-process OS file lock (`issue_to_pr_runs.json.lock`) as well as a
+per-process mutex. The daemon never holds the store lock over a GitHub
+network request: on completion it compares the complete persisted baseline
+and discards stale observations if the desktop cancelled, repaired, or
+updated the run while GitHub was responding.
 
 Issue titles, descriptions, GitHub issue comments, review threads, and Actions
 logs are marked untrusted. The implementation agent's tools are bound to the
@@ -199,9 +209,14 @@ review, and does not replay coding edits. If GitHub already
 created an approved draft PR but local persistence stopped, startup can
 read-only reconcile the exact repository, owned branch, base, draft state
 and HEAD. Ambiguous or stale results never trigger a duplicate write. Verified `ready` runs keep being polled and
-are demoted on an owned-worktree/head mismatch. The desktop must be running
-to poll: the Rust run record survives a daemon restart, but **unattended
-CI polling across a completely stopped desktop is not yet a daemon service**. Live model-backed CI repair,
-GitHub event webhook delivery, and a real provider's token/cost budget are
-not covered by the credential-free fixture. Do not claim these passed
+are demoted on an owned-worktree/head mismatch. The desktop can be closed **as long as the installed user daemon remains
+running**. Release builds already call `monkey daemon ensure` on launch;
+for an unattended/CLI installation, use `monkey daemon ensure` once to
+install and start the service. The daemon never performs agent/model repair,
+Git writes, PR publication, force-push, or automatic merge. Failed CI is
+persisted as `repairing` (or `failed` after the frozen limit), and the
+existing desktop workflow resumes that bounded repair when reopened.
+Live model-backed CI repair, GitHub event webhook delivery, and a real
+provider's token/cost budget are not covered by the credential-free
+fixture. Do not claim these passed
 without separate evidence.
