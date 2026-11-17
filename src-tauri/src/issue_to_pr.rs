@@ -1617,19 +1617,24 @@ pub fn issue_to_pr_monitorable_run_ids(limit: usize) -> Result<Vec<String>, Stri
 /// Network errors do not consume CI-repair attempts or falsely terminate a
 /// verified run. They do revoke previously ready evidence until GitHub can
 /// be queried again. Final publication always needs another live CI check.
+fn revoke_unavailable_ci(run: &mut IssueToPrRun) -> bool {
+    if !matches!(run.status.as_str(), "monitoring_ci" | "ready") { return false; }
+    if run.status == "monitoring_ci" && run.error.as_deref() == Some(CI_MONITOR_UNAVAILABLE) {
+        return false;
+    }
+    run.status = "monitoring_ci".to_string();
+    run.ci_head_oid = None;
+    run.error = Some(CI_MONITOR_UNAVAILABLE.to_string());
+    true
+}
+
 pub fn issue_to_pr_monitor_unavailable(run_id: &str) -> Result<(), String> {
     m5_delivery::validate_id("run id", run_id)?;
     let _guard = lock_runs()?;
     let path = runs_path()?;
     let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, run_id)?;
-    if !matches!(run.status.as_str(), "monitoring_ci" | "ready") { return Ok(()); }
-    if run.status == "monitoring_ci" && run.error.as_deref() == Some(CI_MONITOR_UNAVAILABLE) {
-        return Ok(());
-    }
-    run.status = "monitoring_ci".to_string();
-    run.ci_head_oid = None;
-    run.error = Some(CI_MONITOR_UNAVAILABLE.to_string());
+    if !revoke_unavailable_ci(&mut run) { return Ok(()); }
     run.updated_at_ms = now_ms()?;
     runs.insert(run.run_id.clone(), run);
     save_runs_to(&path, &runs)
@@ -1852,6 +1857,25 @@ mod tests {
         let second = select_monitorable_runs(&runs, 8);
         assert!(second.iter().all(|id| !first.contains(id)));
         assert!(select_monitorable_runs(&runs, 0).is_empty());
+    }
+
+    #[test]
+    fn daemon_network_error_revokes_ready_but_never_consumes_repairs_or_changes_terminal_runs() {
+        let mut ready = fixture_run("owner/repo", 77, 100, "ready");
+        ready.ci_head_oid = Some("a".repeat(40));
+        ready.repair_attempts = 1;
+        ready.max_repair_attempts = 2;
+        assert!(revoke_unavailable_ci(&mut ready));
+        assert_eq!(ready.status, "monitoring_ci");
+        assert!(ready.ci_head_oid.is_none());
+        assert_eq!(ready.repair_attempts, 1);
+        assert_eq!(ready.max_repair_attempts, 2);
+        assert_eq!(ready.error.as_deref(), Some(CI_MONITOR_UNAVAILABLE));
+        assert!(!revoke_unavailable_ci(&mut ready), "Repeated outage is idempotent");
+        ready.status = "cancelled".into();
+        assert!(!revoke_unavailable_ci(&mut ready), "Cancelled runs cannot be revived");
+        ready.status = "repairing".into();
+        assert!(!revoke_unavailable_ci(&mut ready), "Daemon cannot start or consume model repair");
     }
 
     #[test]
