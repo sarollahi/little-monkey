@@ -39,6 +39,14 @@ fn daemon_ci_poll_paused(paths: &DaemonPaths) -> Result<bool, String> {
 }
 
 fn observe_due_once(paths: &DaemonPaths) -> Result<(), String> {
+    // The resident service belongs to the profile chosen when it started.
+    // If the active profile changes underneath it, do not accidentally poll
+    // another profile's draft PRs using this stale daemon identity.
+    let active_data = little_monkey_lib::app_paths::data_dir()
+        .ok_or_else(|| "Could not resolve active issue-to-pr profile".to_string())?;
+    if active_data.as_path() != paths.app_data()? {
+        return Err("Active Little Monkey profile changed; re-ensure the user daemon before CI observation".to_string());
+    }
     // Respect the already-authoritative resident daemon pause/stop controls,
     // using only a read-only SQLite connection to existing service state.
     if daemon_ci_poll_paused(paths)? { return Ok(()); }
