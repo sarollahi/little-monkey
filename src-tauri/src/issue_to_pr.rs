@@ -1583,10 +1583,56 @@ fn poll_ci_shared(run_id: &str, notify: impl Fn(&IssueToPrRun)) -> Result<IssueT
     }.to_string();
     if verdict == "failed" {
         run.error = Some("GitHub CI failed on the current owned head; investigate failed checks before a bounded repair.".to_string());
-    } else if verdict == "passed" {
+    } else {
+        // A successful pending read clears a previous transient transport
+        // error while preserving the real GitHub check history.
         run.error = None;
     }
     persist_ci_update(&path, &baseline, run, &notify)
+}
+
+const CI_MONITOR_UNAVAILABLE: &str =
+    "Daemon CI observation temporarily unavailable; GitHub authentication, network or worktree must recover.";
+
+fn select_monitorable_runs(runs: &RunMap, max: usize) -> Vec<String> {
+    let mut candidates = runs.values()
+        .filter(|run| matches!(run.status.as_str(), "monitoring_ci" | "ready")
+            && run.pr_number.is_some())
+        .collect::<Vec<_>>();
+    // Bounded fair scheduling: every persisted observation updates its time,
+    // so older runs move ahead rather than always polling the first eight.
+    candidates.sort_by(|a, b| (a.updated_at_ms, &a.run_id)
+        .cmp(&(b.updated_at_ms, &b.run_id)));
+    candidates.into_iter().take(max).map(|run| run.run_id.clone()).collect()
+}
+
+/// Daemon-side discovery performs no GitHub calls when no run is monitoring.
+/// Runs are already persisted in the desktop profile's issue-to-PR ledger.
+pub fn issue_to_pr_monitorable_run_ids(limit: usize) -> Result<Vec<String>, String> {
+    let _guard = lock_runs()?;
+    let path = runs_path()?;
+    Ok(select_monitorable_runs(&load_runs_from(&path)?, limit.min(32)))
+}
+
+/// Network errors do not consume CI-repair attempts or falsely terminate a
+/// verified run. They do revoke previously ready evidence until GitHub can
+/// be queried again. Final publication always needs another live CI check.
+pub fn issue_to_pr_monitor_unavailable(run_id: &str) -> Result<(), String> {
+    m5_delivery::validate_id("run id", run_id)?;
+    let _guard = lock_runs()?;
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path)?;
+    let mut run = require_run(&runs, run_id)?;
+    if !matches!(run.status.as_str(), "monitoring_ci" | "ready") { return Ok(()); }
+    if run.status == "monitoring_ci" && run.error.as_deref() == Some(CI_MONITOR_UNAVAILABLE) {
+        return Ok(());
+    }
+    run.status = "monitoring_ci".to_string();
+    run.ci_head_oid = None;
+    run.error = Some(CI_MONITOR_UNAVAILABLE.to_string());
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run);
+    save_runs_to(&path, &runs)
 }
 
 /// Returns only a single draft PR on this repository's exact owned branch,
