@@ -850,6 +850,10 @@ pub fn issue_to_pr_advance(
         ));
     }
     if status == "monitoring_ci" && (pr_number.is_some() || pr_url.is_some() || run.pr_number.is_none()) {
+        let reviewed_inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        if reviewed_inspection.dirty || !reviewed_delivery_state_matches(&run, &reviewed_inspection)? {
+            return Err("Cannot monitor unreviewed or modified committed content".to_string());
+        }
         // A UI callback may record a PR identity only after an actual GitHub
         // write. It cannot supply a made-up number/URL or a fork PR and enter
         // the authoritative CI observer without validating owned branch HEAD.
@@ -893,7 +897,7 @@ pub fn issue_to_pr_advance(
             || pr.get("isCrossRepository").and_then(Value::as_bool) != Some(false)
             || pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str())
             || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
-            || run.review_evidence.is_none()
+            || !reviewed_delivery_state_matches(&run, &inspection)?
         {
             return Err("Final approval refused: owned draft PR or review identity has changed".to_string());
         }
@@ -1089,6 +1093,23 @@ pub fn issue_to_pr_worktree_revision(run_id: String) -> Result<String, String> {
     let run = require_run(&load_runs_from(&runs_path()?)?, &run_id)?;
     let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id)?;
     inspection_digest(&inspection)
+}
+
+/// Validate the reviewed content before commit and after the single
+/// human-approved commit. Safe to call on desktop recovery between commit,
+/// push and PR publication; never initiates any external GitHub operation.
+#[tauri::command]
+pub fn issue_to_pr_delivery_revision_valid(run_id: String) -> Result<bool, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let run = require_run(&load_runs_from(&runs_path()?)?, &run_id)?;
+    if run.status != "opening_pr" { return Ok(false); }
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    if inspection.worktree.marker.branch != run.branch
+        || inspection.worktree.marker.repository_slug != run.repository_slug
+    {
+        return Ok(false);
+    }
+    reviewed_delivery_state_matches(&run, &inspection)
 }
 
 /// Persist actual independent review coverage against a stable tested diff.
@@ -1384,6 +1405,16 @@ pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRu
         run.status = "monitoring_ci".to_string();
         run.ci_head_oid = None;
         run.error = Some("Owned worktree identity changed or local files are dirty. Reconcile before CI readiness.".to_string());
+        run.updated_at_ms = now_ms()?;
+        runs.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &runs)?;
+        emit_progress(&app, &run);
+        return Ok(run);
+    }
+    if !reviewed_delivery_state_matches(&run, &inspection)? {
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("Committed file scope or bytes changed after independent review".to_string());
         run.updated_at_ms = now_ms()?;
         runs.insert(run.run_id.clone(), run.clone());
         save_runs_to(&path, &runs)?;
