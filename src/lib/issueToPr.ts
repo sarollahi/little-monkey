@@ -36,6 +36,8 @@ export interface IssueToPrCiObservation {
   verdict: "pending" | "failed" | "passed";
   checks: IssueToPrCiCheck[];
   observedAtMs: number;
+  reviewedHeadOid: string;
+  reviewedContentsDigest: string;
 }
 
 export interface IssueToPrReviewEvidence {
