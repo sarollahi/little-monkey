@@ -37,6 +37,14 @@ use crate::verify::{run_command_impl, VerifyCommand};
 use crate::{workspace, AppState};
 
 const RUNS_FILE: &str = "issue_to_pr_runs.json";
+// Single desktop process owns the run record. Serialize complete
+// read/modify/write operations: a simultaneous CI poll, model token charge,
+// cancellation or verification completion must never overwrite each other.
+static RUNS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_runs() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    RUNS_LOCK.lock().map_err(|_| "Durable issue run store transaction lock is poisoned".to_string())
+}
 const PROGRESS_EVENT: &str = "issue-to-pr://progress";
 const MAX_RUNS: usize = 500;
 const MAX_ISSUE_URL_LEN: usize = 2_048;
@@ -559,7 +567,10 @@ pub async fn issue_to_pr_start(
     }
 
     let path = runs_path()?;
-    let existing_runs: Vec<IssueToPrRun> = load_runs_from(&path)?.into_values().collect();
+    let existing_runs: Vec<IssueToPrRun> = {
+        let _guard = lock_runs()?;
+        load_runs_from(&path)?.into_values().collect()
+    };
     let reusable = find_reusable_worktree(&existing_runs, &repository_slug, number)
         .and_then(|worktree_id| m5_delivery::m5_delivery_inspect_worktree(worktree_id).ok())
         .filter(|inspection| matches!(inspection.worktree.state.as_str(), "active" | "recovered"));
@@ -643,6 +654,7 @@ pub async fn issue_to_pr_start(
         updated_at_ms: now,
     };
 
+    let _guard = lock_runs()?;
     let mut runs = load_runs_from(&path)?;
     runs.insert(run.run_id.clone(), run.clone());
     prune(&mut runs);
@@ -707,6 +719,7 @@ pub fn issue_to_pr_advance(
     durable_run_id: Option<String>,
 ) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     if !VALID_STATUSES.contains(&status.as_str()) {
         return Err(format!("Unknown issue-to-pr status '{status}'"));
     }
@@ -836,6 +849,8 @@ pub async fn issue_to_pr_run_checks(
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
 
+    let (run, generation) = {
+    let _guard = lock_runs()?;
     let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if !valid_transition(&run.status, "checking") {
@@ -855,6 +870,8 @@ pub async fn issue_to_pr_run_checks(
     runs.insert(run.run_id.clone(), run.clone());
     save_runs_to(&path, &runs)?;
     emit_progress(&app, &run);
+    (run, generation)
+    }; // Release store lock before running potentially long test subprocesses.
 
     let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
     let root = PathBuf::from(&inspection.worktree.marker.canonical_path);
@@ -919,6 +936,7 @@ pub async fn issue_to_pr_run_checks(
         });
     }
 
+    let _guard = lock_runs()?;
     let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if !is_current_verification(&run, generation) {
@@ -972,6 +990,7 @@ pub fn issue_to_pr_record_review(
     summary: String,
 ) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     if revision.len() != 64 || !revision.bytes().all(|c| c.is_ascii_hexdigit())
         || files_reviewed.is_empty() || files_reviewed.len() > 512
     {
@@ -1098,6 +1117,7 @@ pub fn issue_to_pr_set_repair_limit(
     max_attempts: u32,
 ) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     if max_attempts > 5 {
         return Err("Repair limit must be between 0 and 5".to_string());
     }
@@ -1124,6 +1144,7 @@ pub fn issue_to_pr_set_execution_budget(
     total_token_budget: u64,
 ) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     if !(60_000..=2 * 60 * 60_000).contains(&agent_wall_time_ms) {
         return Err("Per-agent wall budget must be between 1 and 120 minutes".to_string());
     }
@@ -1158,6 +1179,7 @@ pub fn issue_to_pr_charge_tokens(
     output_tokens: u64,
 ) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     m5_delivery::validate_id("usage id", &usage_id)?;
     if input_tokens > 10_000_000 || output_tokens > 10_000_000 {
         return Err("Unreasonable token accounting event rejected".to_string());
@@ -1201,6 +1223,7 @@ pub fn issue_to_pr_charge_tokens(
 #[tauri::command]
 pub fn issue_to_pr_begin_repair(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     let path = runs_path()?;
     let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
@@ -1227,6 +1250,7 @@ pub fn issue_to_pr_begin_repair(app: AppHandle, run_id: String) -> Result<IssueT
 #[tauri::command]
 pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     let path = runs_path()?;
     let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
@@ -1369,6 +1393,7 @@ fn find_matching_owned_draft_pr(
 #[tauri::command]
 pub fn issue_to_pr_reconcile_pr(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     let path = runs_path()?;
     let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
@@ -1396,6 +1421,7 @@ pub fn issue_to_pr_reconcile_pr(app: AppHandle, run_id: String) -> Result<IssueT
 #[tauri::command]
 pub fn issue_to_pr_cancel(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     let path = runs_path()?;
     let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
