@@ -749,11 +749,7 @@ pub(crate) async fn prepare_authorization(
     redirect_uri: &str,
     manual_client: Option<&ManualClientRegistration>,
 ) -> Result<PreparedAuthorization, String> {
-    let metadata = manager
-        .resolve_metadata()
-        .await
-        .map_err(auth_err)?
-        .metadata;
+    let metadata = manager.resolve_metadata().await.map_err(auth_err)?.metadata;
     let supports_cimd = authorization_server_supports_cimd(&metadata);
     manager.set_metadata(metadata);
 
