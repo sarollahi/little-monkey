@@ -23,10 +23,12 @@
 //! write.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
@@ -35,22 +37,67 @@ use crate::verify::{run_command_impl, VerifyCommand};
 use crate::{workspace, AppState};
 
 const RUNS_FILE: &str = "issue_to_pr_runs.json";
+// In-process mutex plus OS file lock serialize every whole-record mutation
+// across the desktop and the separately running monkey-cli daemon. The file
+// lock is attached to a stable inode (never renamed or deleted). File::lock
+// is supported by Rust 1.89+ on Linux/macOS/Windows with no new dependency.
+static RUNS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Separate asynchronous start lease prevents duplicate worktree creation.
+static START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct RunStoreGuard {
+    // Drop order matters: unlock the OS file first, then the process mutex.
+    _file: std::fs::File,
+    _thread: std::sync::MutexGuard<'static, ()>,
+}
+
+fn acquire_run_store_file_lock(path: &Path) -> Result<std::fs::File, String> {
+    let lock_path = path.with_extension("json.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true).write(true).create(true)
+        .open(&lock_path)
+        .map_err(|error| format!("Cannot open issue run store lock: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Cannot protect issue run store lock: {error}"))?;
+    }
+    file.lock().map_err(|error| format!("Cannot lock issue run store: {error}"))?;
+    Ok(file)
+}
+
+fn lock_runs() -> Result<RunStoreGuard, String> {
+    let thread = RUNS_LOCK.lock()
+        .map_err(|_| "Durable issue run store transaction lock is poisoned".to_string())?;
+    let path = runs_path()?;
+    let file = acquire_run_store_file_lock(&path)?;
+    Ok(RunStoreGuard { _file: file, _thread: thread })
+}
 const PROGRESS_EVENT: &str = "issue-to-pr://progress";
 const MAX_RUNS: usize = 500;
 const MAX_ISSUE_URL_LEN: usize = 2_048;
 const BRANCH_PREFIX: &str = "issue-to-pr/";
 const CHECK_OUTPUT_CAP: usize = 4_096;
+const CI_HISTORY_CAP: usize = 64;
+const MAX_REPAIR_ATTEMPTS: u32 = 2;
+fn default_max_repair_attempts() -> u32 { MAX_REPAIR_ATTEMPTS }
+fn default_agent_wall_time_ms() -> u64 { 30 * 60_000 }
+fn default_total_token_budget() -> u64 { 250_000 }
 const DEFAULT_PROTECTED_BRANCHES: [&str; 3] = ["main", "master", "develop"];
 
 fn default_base_ref() -> String {
     "HEAD".to_string()
 }
-const VALID_STATUSES: [&str; 8] = [
+const VALID_STATUSES: [&str; 11] = [
     "planning",
     "implementing",
     "checking",
     "opening_pr",
     "awaiting_review",
+    "monitoring_ci",
+    "repairing",
+    "ready",
     "done",
     "failed",
     "cancelled",
@@ -64,6 +111,40 @@ pub struct CheckOutcome {
     pub passed: bool,
     pub code: Option<i32>,
     pub output_excerpt: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CiCheckEvidence {
+    pub name: String,
+    pub state: String,
+    pub conclusion: String,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CiObservation {
+    pub head_oid: String,
+    pub verdict: String,
+    pub checks: Vec<CiCheckEvidence>,
+    pub observed_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewEvidence {
+    pub revision: String,
+    pub files_reviewed: Vec<String>,
+    pub summary: String,
+    pub observed_at_ms: u64,
+    /// HEAD at the time of independent review, before the human-approved commit.
+    #[serde(default)]
+    pub reviewed_head_oid: String,
+    /// Content snapshot is independent of Git's precommit/postcommit index
+    /// representation so a safely committed patch can resume after a crash.
+    #[serde(default)]
+    pub reviewed_contents_digest: String,
 }
 
 /// One issue-to-PR run. Persisted whole (not event-sourced) at
@@ -82,6 +163,9 @@ pub struct IssueToPrRun {
     pub issue_number: u32,
     pub issue_title: String,
     pub issue_body: String,
+    /// Bounded issue comments are context, never executable instructions.
+    #[serde(default)]
+    pub issue_comments: Vec<String>,
     pub worktree_id: String,
     pub branch: String,
     /// The branch/ref the owned worktree was created from and the eventual PR
@@ -101,6 +185,37 @@ pub struct IssueToPrRun {
     pub pr_url: Option<String>,
     #[serde(default)]
     pub checks: Vec<CheckOutcome>,
+    /// Fences overlapping check processes and cancellation across restarts.
+    #[serde(default)]
+    pub verification_generation: u64,
+    #[serde(default)]
+    pub verification_in_progress: bool,
+    /// Independent reviewer evidence tied to the exact tested owned diff.
+    #[serde(default)]
+    pub review_evidence: Option<ReviewEvidence>,
+    /// Authoritative GitHub check snapshots, versioned by exact PR head SHA.
+    #[serde(default)]
+    pub ci_history: Vec<CiObservation>,
+    #[serde(default)]
+    pub ci_head_oid: Option<String>,
+    #[serde(default)]
+    pub repair_attempts: u32,
+    #[serde(default = "default_max_repair_attempts")]
+    pub max_repair_attempts: u32,
+    /// Prevent a resumed desktop from consuming the same repair attempt twice.
+    #[serde(default)]
+    pub repair_in_progress: bool,
+    /// Per-agent-turn wall time ceiling; persisted and frozen before execution.
+    #[serde(default = "default_agent_wall_time_ms")]
+    pub agent_wall_time_ms: u64,
+    /// Total observed model tokens across implementation, independent review and repairs.
+    #[serde(default = "default_total_token_budget")]
+    pub total_token_budget: u64,
+    #[serde(default)]
+    pub tokens_used: u64,
+    /// Idempotency for replayed model usage events after a crash or retry.
+    #[serde(default)]
+    pub usage_event_ids: Vec<String>,
     #[serde(default)]
     pub error: Option<String>,
     /// Run Capsule ledger id for the headless agent turn, once the frontend
@@ -192,7 +307,13 @@ fn valid_transition(from: &str, to: &str) -> bool {
             | ("implementing", "checking")
             | ("checking", "opening_pr")
             | ("opening_pr", "awaiting_review")
-            | ("awaiting_review", "done")
+            | ("opening_pr", "monitoring_ci")
+            | ("awaiting_review", "monitoring_ci")
+            | ("monitoring_ci", "repairing")
+            | ("monitoring_ci", "ready")
+            | ("repairing", "checking")
+            | ("checking", "repairing")
+            | ("ready", "done")
     )
 }
 
@@ -213,6 +334,20 @@ pub fn find_reusable_worktree(
         })
         .max_by_key(|run| run.created_at_ms)
         .map(|run| run.worktree_id.clone())
+}
+
+fn find_active_issue_run<'a>(
+    runs: &'a [IssueToPrRun],
+    repository_slug: &str,
+    issue_number: u32,
+) -> Option<&'a IssueToPrRun> {
+    runs.iter()
+        .filter(|run| {
+            run.repository_slug.eq_ignore_ascii_case(repository_slug)
+                && run.issue_number == issue_number
+                && !is_terminal(&run.status)
+        })
+        .max_by_key(|run| (run.created_at_ms, &run.run_id))
 }
 
 fn detect_package_manager(root: &Path) -> &'static str {
@@ -244,7 +379,7 @@ fn detect_check_commands(root: &Path) -> Result<Vec<(String, String)>, String> {
     let manager = detect_package_manager(root);
     let mut commands = Vec::new();
     if let Some(scripts) = value.get("scripts").and_then(Value::as_object) {
-        for name in ["test", "build"] {
+        for name in ["test", "lint", "typecheck", "build"] {
             if scripts.contains_key(name) {
                 commands.push((name.to_string(), format!("{manager} run {name}")));
             }
@@ -262,6 +397,206 @@ fn bounded(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
+}
+
+/// Included in both verification and independent-review fingerprints. Git
+/// diff and porcelain status record untracked file NAMES but not their bytes;
+/// hashing only those records allowed an untracked source file to change
+/// without invalidating passed tests or a prior independent review.
+///
+/// Ask Git to enumerate every non-ignored untracked file (including inside
+/// directories that porcelain collapses). Never follow symlinks or hash an
+/// unbounded binary blob into the model evidence pipeline.
+fn hash_untracked_contents(root: &Path, hasher: &mut Sha256) -> Result<(), String> {
+    const MAX_FILES: usize = 2_048;
+    const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+    let output = std::process::Command::new("git")
+        .arg("-C").arg(root)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output().map_err(|e| format!("Could not list untracked owned files: {e}"))?;
+    if !output.status.success() {
+        return Err("Could not enumerate untracked owned files; revision evidence is unavailable".to_string());
+    }
+    if output.stdout.len() > 4 * 1024 * 1024 {
+        return Err("Too many untracked paths to fingerprint safely".to_string());
+    }
+    let root = root.canonicalize()
+        .map_err(|e| format!("Could not canonicalize owned worktree: {e}"))?;
+    let mut total_bytes = 0_u64;
+    let mut file_count = 0_usize;
+    for raw in output.stdout.split(|byte| *byte == 0).filter(|bytes| !bytes.is_empty()) {
+        file_count += 1;
+        if file_count > MAX_FILES { return Err("Too many untracked files to verify".to_string()); }
+        let relative = std::str::from_utf8(raw)
+            .map_err(|_| "Untracked filename is not valid UTF-8".to_string())?;
+        let relative_path = Path::new(relative);
+        if !relative_path.components().all(|part| matches!(part, Component::Normal(_))) {
+            return Err("Untracked file path escapes owned worktree".to_string());
+        }
+        let file_path = root.join(relative_path);
+        let metadata = std::fs::symlink_metadata(&file_path)
+            .map_err(|e| format!("Cannot inspect untracked file {relative}: {e}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!("Untracked file {relative} must be a regular file; stage and review links separately"));
+        }
+        let physical_path = file_path.canonicalize()
+            .map_err(|e| format!("Cannot resolve untracked file {relative}: {e}"))?;
+        if !physical_path.starts_with(&root) {
+            return Err("Untracked file resolves outside owned worktree".to_string());
+        }
+        total_bytes = total_bytes.checked_add(metadata.len())
+            .ok_or_else(|| "Untracked content size overflow".to_string())?;
+        if total_bytes > MAX_TOTAL_BYTES {
+            return Err("Untracked file contents exceed the bounded 128 MiB evidence limit".to_string());
+        }
+        hasher.update((raw.len() as u64).to_le_bytes());
+        hasher.update(raw);
+        hasher.update(metadata.len().to_le_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            hasher.update(metadata.permissions().mode().to_le_bytes());
+        }
+        #[cfg(not(unix))]
+        hasher.update([u8::from(metadata.permissions().readonly())]);
+        let mut file = std::fs::File::open(&file_path)
+            .map_err(|e| format!("Cannot read untracked file {relative}: {e}"))?;
+        let mut buffer = [0_u8; 32 * 1024];
+        let mut read_bytes = 0_u64;
+        loop {
+            let n = file.read(&mut buffer)
+                .map_err(|e| format!("Cannot fingerprint untracked file {relative}: {e}"))?;
+            if n == 0 { break; }
+            read_bytes += n as u64;
+            if read_bytes > metadata.len() || read_bytes > MAX_TOTAL_BYTES {
+                return Err("Untracked file changed or grew during revision fingerprinting".to_string());
+            }
+            hasher.update(&buffer[..n]);
+        }
+        if read_bytes != metadata.len() {
+            return Err("Untracked file size changed during revision fingerprinting".to_string());
+        }
+    }
+    hasher.update((file_count as u64).to_le_bytes());
+    Ok(())
+}
+
+/// Stable file-content proof for the exact changed-file set reviewed before
+/// Git commit. Deleted paths are represented explicitly. Hashes actual bytes,
+/// not Git status entries, and refuses link traversal and oversized assets.
+fn reviewed_contents_digest(root: &Path, files: &[String]) -> Result<String, String> {
+    if files.is_empty() || files.len() > 512 {
+        return Err("Review content snapshot must contain 1..512 files".to_string());
+    }
+    let root = root.canonicalize()
+        .map_err(|e| format!("Could not resolve owned worktree: {e}"))?;
+    let mut files = files.to_vec();
+    files.sort();
+    files.dedup();
+    let mut total_bytes = 0_u64;
+    let mut sha = Sha256::new();
+    for relative in files {
+        let path = Path::new(&relative);
+        if !path.components().all(|part| matches!(part, Component::Normal(_))) {
+            return Err("Reviewed content path must stay inside the owned worktree".to_string());
+        }
+        sha.update((relative.len() as u64).to_le_bytes());
+        sha.update(relative.as_bytes());
+        let full = root.join(path);
+        let metadata = match std::fs::symlink_metadata(&full) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                sha.update([0_u8]); // Reviewed deletion
+                continue;
+            }
+            Err(error) => return Err(format!("Cannot inspect reviewed path {relative}: {error}")),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Reviewed file must be regular; symlinks and directories need manual review".to_string());
+        }
+        if !full.canonicalize().map_err(|e| e.to_string())?.starts_with(&root) {
+            return Err("Reviewed path resolves outside owned worktree".to_string());
+        }
+        total_bytes = total_bytes.checked_add(metadata.len())
+            .ok_or_else(|| "Reviewed content exceeds size limit".to_string())?;
+        if total_bytes > 128 * 1024 * 1024 {
+            return Err("Reviewed content exceeds bounded 128 MiB limit".to_string());
+        }
+        sha.update([1_u8]);
+        sha.update(metadata.len().to_le_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            sha.update(metadata.permissions().mode().to_le_bytes());
+        }
+        #[cfg(not(unix))]
+        sha.update([u8::from(metadata.permissions().readonly())]);
+        let mut file = std::fs::File::open(&full)
+            .map_err(|e| format!("Could not read reviewed path {relative}: {e}"))?;
+        let mut buffer = [0_u8; 32 * 1024];
+        let mut remaining = metadata.len();
+        loop {
+            let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            if (n as u64) > remaining { return Err("Reviewed file changed while hashing".to_string()); }
+            remaining -= n as u64;
+            sha.update(&buffer[..n]);
+        }
+        if remaining != 0 { return Err("Reviewed file changed while hashing".to_string()); }
+    }
+    Ok(format!("{:x}", sha.finalize()))
+}
+
+/// The original dirty diff is valid before commit. After the typed-approval
+/// commit, the exact one new commit must have reviewed HEAD as its parent,
+/// change only reviewed paths, and contain byte-for-byte reviewed file data.
+fn reviewed_delivery_state_matches(
+    run: &IssueToPrRun,
+    inspection: &m5_delivery::WorktreeInspection,
+) -> Result<bool, String> {
+    let Some(review) = &run.review_evidence else { return Ok(false) };
+    if review.revision == inspection_digest(inspection)? { return Ok(true); }
+    if inspection.dirty || review.reviewed_head_oid.is_empty() || review.reviewed_contents_digest.is_empty() {
+        return Ok(false);
+    }
+    let root = Path::new(&inspection.worktree.marker.canonical_path);
+    let output = std::process::Command::new("git").arg("-C").arg(root)
+        .args(["rev-parse", "HEAD^"]).output()
+        .map_err(|e| format!("Cannot inspect approved commit parent: {e}"))?;
+    if !output.status.success()
+        || String::from_utf8_lossy(&output.stdout).trim() != review.reviewed_head_oid
+    {
+        return Ok(false);
+    }
+    let names = std::process::Command::new("git").arg("-C").arg(root)
+        .args(["diff", "--name-only", "--no-renames", "-z", &review.reviewed_head_oid, "HEAD", "--"])
+        .output().map_err(|e| format!("Cannot inspect committed file scope: {e}"))?;
+    if !names.status.success() || names.stdout.len() > 4 * 1024 * 1024 { return Ok(false); }
+    let mut changed = names.stdout.split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| std::str::from_utf8(name).map(str::to_string))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Commit contains non-UTF8 paths; manual review required".to_string())?;
+    changed.sort();
+    changed.dedup();
+    let mut reviewed = review.files_reviewed.clone();
+    reviewed.sort();
+    reviewed.dedup();
+    if changed != reviewed { return Ok(false); }
+    Ok(reviewed_contents_digest(root, &review.files_reviewed)? == review.reviewed_contents_digest)
+}
+
+fn inspection_digest(inspection: &m5_delivery::WorktreeInspection) -> Result<String, String> {
+    if inspection.diffs.staged.truncated || inspection.diffs.unstaged.truncated || inspection.diffs.head.truncated {
+        return Err("Owned diff exceeds verification evidence limits".to_string());
+    }
+    let serialized = serde_json::to_vec(&(
+        &inspection.head_oid, &inspection.files, &inspection.diffs
+    )).map_err(|error| format!("Could not fingerprint owned worktree: {error}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&serialized);
+    hash_untracked_contents(Path::new(&inspection.worktree.marker.canonical_path), &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn now_ms() -> Result<u64, String> {
@@ -306,22 +641,36 @@ fn runs_path() -> Result<PathBuf, String> {
     Ok(dir.join(RUNS_FILE))
 }
 
-fn load_runs_from(path: &Path) -> RunMap {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return RunMap::new();
+fn load_runs_from(path: &Path) -> Result<RunMap, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(RunMap::new()),
+        Err(error) => return Err(format!("Cannot read durable issue run store: {error}")),
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    // Never turn malformed data into an empty map and later overwrite it.
+    // A corrupt or interrupted checkpoint must remain available for repair.
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("Durable issue run store is corrupt; refusing to overwrite: {error}"))
 }
 
 fn save_runs_to(path: &Path, runs: &RunMap) -> Result<(), String> {
     let json = serde_json::to_string_pretty(runs)
         .map_err(|error| format!("Failed to serialize issue-to-pr runs: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)
-        .map_err(|error| format!("Failed to write issue-to-pr runs: {error}"))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|error| format!("Failed to finalize issue-to-pr runs: {error}"))?;
-    Ok(())
+    // Separate writers must never share a fixed .tmp path. The owning
+    // transaction lock coordinates in-process read/modify/write operations.
+    let tmp = path.with_extension(format!("{}.tmp", Uuid::new_v4().simple()));
+    let outcome = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .open(&tmp).map_err(|error| format!("Failed to create issue run checkpoint: {error}"))?;
+        file.write_all(json.as_bytes())
+            .map_err(|error| format!("Failed to write issue run checkpoint: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("Failed to sync issue run checkpoint: {error}"))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|error| format!("Failed to finalize issue run checkpoint: {error}"))
+    })();
+    if outcome.is_err() { let _ = std::fs::remove_file(&tmp); }
+    outcome
 }
 
 fn emit_progress(app: &AppHandle, run: &IssueToPrRun) {
@@ -361,6 +710,7 @@ pub async fn issue_to_pr_start(
 ) -> Result<IssueToPrRun, String> {
     let (owner, repo, number) = parse_issue_url(&issue_url)?;
     let repository_slug = format!("{owner}/{repo}");
+    let _start_guard = START_LOCK.lock().await;
     let repository_root = workspace::primary_root_canon(&state)?.to_path_buf();
     let base_ref = m5_delivery::current_branch(&repository_root)?;
 
@@ -373,7 +723,38 @@ pub async fn issue_to_pr_start(
     }
 
     let path = runs_path()?;
-    let existing_runs: Vec<IssueToPrRun> = load_runs_from(&path).into_values().collect();
+    let existing_runs: Vec<IssueToPrRun> = {
+        let _guard = lock_runs()?;
+        load_runs_from(&path)?.into_values().collect()
+    };
+    // Reattach the authoritative nonterminal run instead of launching
+    // another autonomous agent against its owned Git branch. Verify the
+    // recorded ownership before attaching a root in this desktop process.
+    if let Some(existing) = find_active_issue_run(&existing_runs, &repository_slug, number) {
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(existing.worktree_id.clone())?;
+        if inspection.worktree.marker.repository_slug != existing.repository_slug
+            || inspection.worktree.marker.branch != existing.branch
+        {
+            return Err("Existing issue run worktree ownership differs; refusing duplicate start".to_string());
+        }
+        let label = workspace::add_secondary_workspace_root_impl(
+            state.inner(), inspection.worktree.marker.canonical_path.clone(),
+        )?.label;
+        let _guard = lock_runs()?;
+        let mut current = load_runs_from(&path)?;
+        let mut resumed = require_run(&current, &existing.run_id)?;
+        if !is_terminal(&resumed.status)
+            && resumed.repository_slug == repository_slug
+            && resumed.issue_number == number
+        {
+            resumed.workspace_label = label;
+            resumed.updated_at_ms = now_ms()?;
+            current.insert(resumed.run_id.clone(), resumed.clone());
+            save_runs_to(&path, &current)?;
+            emit_progress(&app, &resumed);
+            return Ok(resumed);
+        }
+    }
     let reusable = find_reusable_worktree(&existing_runs, &repository_slug, number)
         .and_then(|worktree_id| m5_delivery::m5_delivery_inspect_worktree(worktree_id).ok())
         .filter(|inspection| matches!(inspection.worktree.state.as_str(), "active" | "recovered"));
@@ -411,11 +792,16 @@ pub async fn issue_to_pr_start(
         .and_then(Value::as_str)
         .unwrap_or("Untitled issue")
         .to_string();
-    let issue_body = issue
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let issue_body = bounded(issue
+        .get("body").and_then(Value::as_str).unwrap_or(""), 32_000);
+    let issue_comments: Vec<String> = issue
+        .get("comments").and_then(Value::as_array)
+        .map(|comments| comments.iter().take(24).filter_map(|comment| {
+            let body = comment.get("body")?.as_str()?;
+            let author = comment.get("author").and_then(|a| a.get("login"))
+                .and_then(Value::as_str).unwrap_or("unknown");
+            Some(format!("Author {}: {}", bounded(author, 80), bounded(body, 2_000)))
+        }).collect()).unwrap_or_default();
 
     let now = now_ms()?;
     let run = IssueToPrRun {
@@ -425,6 +811,7 @@ pub async fn issue_to_pr_start(
         issue_number: number,
         issue_title,
         issue_body,
+        issue_comments,
         worktree_id,
         branch,
         base_ref: run_base_ref,
@@ -433,13 +820,26 @@ pub async fn issue_to_pr_start(
         pr_number: None,
         pr_url: None,
         checks: Vec::new(),
+        verification_generation: 0,
+        verification_in_progress: false,
+        review_evidence: None,
+        ci_history: Vec::new(),
+        ci_head_oid: None,
+        repair_attempts: 0,
+        max_repair_attempts: MAX_REPAIR_ATTEMPTS,
+        repair_in_progress: false,
+        agent_wall_time_ms: default_agent_wall_time_ms(),
+        total_token_budget: default_total_token_budget(),
+        tokens_used: 0,
+        usage_event_ids: Vec::new(),
         error: None,
         durable_run_id: None,
         created_at_ms: now,
         updated_at_ms: now,
     };
 
-    let mut runs = load_runs_from(&path);
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(&path)?;
     runs.insert(run.run_id.clone(), run.clone());
     prune(&mut runs);
     save_runs_to(&path, &runs)?;
@@ -503,17 +903,97 @@ pub fn issue_to_pr_advance(
     durable_run_id: Option<String>,
 ) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     if !VALID_STATUSES.contains(&status.as_str()) {
         return Err(format!("Unknown issue-to-pr status '{status}'"));
     }
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
+    if status == "ready" {
+        // Only issue_to_pr_poll_ci may establish readiness after consulting
+        // authoritative GitHub checks for the matching owned PR commit.
+        return Err("Ready is reserved for authoritative GitHub CI verification".to_string());
+    }
     if !valid_transition(&run.status, &status) {
         return Err(format!(
             "Cannot move an issue-to-pr run from '{}' to '{status}'",
             run.status
         ));
+    }
+    if status == "monitoring_ci" && (pr_number.is_some() || pr_url.is_some() || run.pr_number.is_none()) {
+        let reviewed_inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        if reviewed_inspection.dirty || !reviewed_delivery_state_matches(&run, &reviewed_inspection)? {
+            return Err("Cannot monitor unreviewed or modified committed content".to_string());
+        }
+        // A UI callback may record a PR identity only after an actual GitHub
+        // write. It cannot supply a made-up number/URL or a fork PR and enter
+        // the authoritative CI observer without validating owned branch HEAD.
+        let number = pr_number.or(run.pr_number)
+            .ok_or_else(|| "Missing GitHub draft PR number".to_string())?;
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        if inspection.dirty
+            || inspection.worktree.marker.branch != run.branch
+            || inspection.worktree.marker.repository_slug != run.repository_slug
+        {
+            return Err("Cannot monitor CI for a dirty or non-owned worktree".to_string());
+        }
+        let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
+        let expected_url = format!("https://github.com/{}/pull/{number}", run.repository_slug);
+        if pr.get("isDraft").and_then(Value::as_bool) != Some(true)
+            || pr.get("state").and_then(Value::as_str) != Some("OPEN")
+            || pr.get("isCrossRepository").and_then(Value::as_bool) != Some(false)
+            || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
+            || pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str())
+            || pr.get("headRefOid").and_then(Value::as_str) != Some(inspection.head_oid.as_str())
+            || pr.get("url").and_then(Value::as_str) != Some(expected_url.as_str())
+            || pr_url.as_ref().is_some_and(|url| url != &expected_url)
+        {
+            return Err("The supplied draft PR does not match the owned branch, base, HEAD and GitHub URL".to_string());
+        }
+        run.pr_number = Some(number);
+        run.pr_url = Some(expected_url);
+    }
+    if status == "done" {
+        // The final human action must not consume a stale stored "ready".
+        // Re-read real GitHub checks and owned head at the approval boundary.
+        let number = run.pr_number.ok_or_else(|| "Missing owned draft PR".to_string())?;
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
+        let head_oid = pr.get("headRefOid").and_then(Value::as_str)
+            .ok_or_else(|| "GitHub did not return the current PR head".to_string())?;
+        if inspection.dirty || inspection.head_oid != head_oid
+            || run.ci_head_oid.as_deref() != Some(head_oid)
+            || pr.get("isDraft").and_then(Value::as_bool) != Some(true)
+            || pr.get("state").and_then(Value::as_str) != Some("OPEN")
+            || pr.get("isCrossRepository").and_then(Value::as_bool) != Some(false)
+            || pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str())
+            || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
+            || !reviewed_delivery_state_matches(&run, &inspection)?
+        {
+            return Err("Final approval refused: owned draft PR or review identity has changed".to_string());
+        }
+        let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
+        let (raw_ci, mut checks) = classify_ci_rollup(&rollup)?;
+        checks.sort_by(|a, b| (&a.name, &a.state, &a.conclusion, &a.url)
+            .cmp(&(&b.name, &b.state, &b.conclusion, &b.url)));
+        if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid)
+            || settled_ci_verdict(&raw_ci, head_oid, &checks, run.ci_history.last(), now_ms()?) != "passed"
+            || run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0))
+        {
+            return Err("Final approval refused: authoritative GitHub CI is not green for the current owned head".to_string());
+        }
+    }
+    if run.status == "checking" && status == "opening_pr" {
+        if run.verification_in_progress || run.checks.is_empty() || !run.checks.iter().all(|check| check.passed && check.code == Some(0)) {
+            return Err("Cannot authorize PR delivery without successful repository checks".to_string());
+        }
+        let evidence = run.review_evidence.as_ref()
+            .ok_or_else(|| "Cannot deliver without independent revision-bound review evidence".to_string())?;
+        let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+        if evidence.revision != inspection_digest(&inspection)? {
+            return Err("Owned diff changed since the independent review".to_string());
+        }
     }
     run.status = status;
     if let Some(error) = error {
@@ -535,6 +1015,12 @@ pub fn issue_to_pr_advance(
     Ok(run)
 }
 
+fn is_current_verification(run: &IssueToPrRun, expected_generation: u64) -> bool {
+    run.status == "checking"
+        && run.verification_in_progress
+        && run.verification_generation == expected_generation
+}
+
 /// Detects and runs the owned worktree's own `test`/`build` scripts (see
 /// `detect_check_commands`) via the exact same `AppHandle`-free execution
 /// core `verify.rs` uses for its own post-edit checks — deliberately not
@@ -551,7 +1037,9 @@ pub async fn issue_to_pr_run_checks(
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
 
-    let mut runs = load_runs_from(&path);
+    let (run, generation) = {
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if !valid_transition(&run.status, "checking") {
         return Err(format!(
@@ -560,24 +1048,34 @@ pub async fn issue_to_pr_run_checks(
         ));
     }
     run.status = "checking".to_string();
+    run.verification_generation = run.verification_generation.checked_add(1)
+        .ok_or_else(|| "Verification generation exhausted".to_string())?;
+    run.review_evidence = None;
+    run.checks.clear();
+    run.verification_in_progress = true;
+    let generation = run.verification_generation;
     run.updated_at_ms = now_ms()?;
     runs.insert(run.run_id.clone(), run.clone());
     save_runs_to(&path, &runs)?;
     emit_progress(&app, &run);
+    (run, generation)
+    }; // Release store lock before running potentially long test subprocesses.
 
     let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
     let root = PathBuf::from(&inspection.worktree.marker.canonical_path);
+    let before_digest = inspection_digest(&inspection)?;
     let detected = detect_check_commands(&root)?;
 
     let mut outcomes = Vec::new();
     let mut all_passed = true;
     if detected.is_empty() {
+        all_passed = false;
         outcomes.push(CheckOutcome {
             label: "no scripts detected".to_string(),
             command: String::new(),
-            passed: true,
+            passed: false,
             code: None,
-            output_excerpt: "No test/build script was found in this repository's package.json."
+            output_excerpt: "No test/build scripts detected. Configure authoritative repository checks before delivery."
                 .to_string(),
         });
     } else {
@@ -613,19 +1111,125 @@ pub async fn issue_to_pr_run_checks(
         }
     }
 
-    let mut runs = load_runs_from(&path);
+    let after_inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    let stable = inspection_digest(&after_inspection).map(|digest| digest == before_digest).unwrap_or(false);
+    if !stable {
+        all_passed = false;
+        outcomes.push(CheckOutcome {
+            label: "workspace revision".to_string(),
+            command: "owned worktree fingerprint".to_string(),
+            passed: false,
+            code: None,
+            output_excerpt: "Workspace changed during verification or evidence was truncated; results are stale.".to_string(),
+        });
+    }
+
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
+    if !is_current_verification(&run, generation) {
+        // Cancellation or a newer verifier took ownership during the
+        // subprocess. Preserve their authoritative state and evidence.
+        return Err("Stale verification completion ignored: run cancelled, moved on, or superseded".to_string());
+    }
     run.checks = outcomes;
+    run.verification_in_progress = false;
+    run.review_evidence = None; // New verification invalidates any prior diff review.
     run.status = if all_passed {
-        "opening_pr".to_string()
+        // Do not expose Git delivery before the independent diff review finishes.
+        "checking".to_string()
+    } else if run.repair_attempts < run.max_repair_attempts {
+        "repairing".to_string()
     } else {
         "failed".to_string()
     };
-    if !all_passed {
+    run.repair_in_progress = false;
+    if all_passed {
+        run.error = None;
+    } else {
         run.error = Some(
-            "One or more checks failed in the owned worktree. Fix them (or push and open the draft PR manually from the Git delivery panel) before retrying.".to_string(),
+            "Authoritative owned-worktree checks failed. The bounded repair stage must resolve them before delivery.".to_string(),
         );
     }
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// Read only: stable revision fingerprint from the existing owned worktree.
+#[tauri::command]
+pub fn issue_to_pr_worktree_revision(run_id: String) -> Result<String, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let run = require_run(&load_runs_from(&runs_path()?)?, &run_id)?;
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id)?;
+    inspection_digest(&inspection)
+}
+
+/// Validate the reviewed content before commit and after the single
+/// human-approved commit. Safe to call on desktop recovery between commit,
+/// push and PR publication; never initiates any external GitHub operation.
+#[tauri::command]
+pub fn issue_to_pr_delivery_revision_valid(run_id: String) -> Result<bool, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let run = require_run(&load_runs_from(&runs_path()?)?, &run_id)?;
+    if run.status != "opening_pr" { return Ok(false); }
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    if inspection.worktree.marker.branch != run.branch
+        || inspection.worktree.marker.repository_slug != run.repository_slug
+    {
+        return Ok(false);
+    }
+    reviewed_delivery_state_matches(&run, &inspection)
+}
+
+/// Persist actual independent review coverage against a stable tested diff.
+/// The client does not get to mark a review successful by changing status.
+#[tauri::command]
+pub fn issue_to_pr_record_review(
+    app: AppHandle,
+    run_id: String,
+    revision: String,
+    files_reviewed: Vec<String>,
+    summary: String,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
+    if revision.len() != 64 || !revision.bytes().all(|c| c.is_ascii_hexdigit())
+        || files_reviewed.is_empty() || files_reviewed.len() > 512
+    {
+        return Err("Invalid independent review revision or file coverage".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path)?;
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "checking" || run.verification_in_progress || run.checks.is_empty()
+        || !run.checks.iter().all(|check| check.passed && check.code == Some(0))
+    {
+        return Err("An independent review requires successful authoritative local checks".to_string());
+    }
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    if inspection_digest(&inspection)? != revision {
+        return Err("Independent review evidence does not match the current owned diff".to_string());
+    }
+    let changed: Vec<&str> = inspection.files.iter().filter(|file| !file.ignored)
+        .map(|file| file.path.as_str()).collect();
+    if changed.is_empty() || changed.iter().any(|path| !files_reviewed.iter().any(|reviewed| reviewed.as_str() == *path)) {
+        return Err("Independent review did not cover every changed file".to_string());
+    }
+    let reviewed_head_oid = inspection.head_oid.clone();
+    let reviewed_contents_digest = reviewed_contents_digest(
+        Path::new(&inspection.worktree.marker.canonical_path), &files_reviewed,
+    )?;
+    run.review_evidence = Some(ReviewEvidence {
+        revision,
+        files_reviewed,
+        summary: bounded(&summary, 4_000),
+        observed_at_ms: now_ms()?,
+        reviewed_head_oid,
+        reviewed_contents_digest,
+    });
     run.updated_at_ms = now_ms()?;
     runs.insert(run.run_id.clone(), run.clone());
     save_runs_to(&path, &runs)?;
@@ -638,11 +1242,536 @@ pub async fn issue_to_pr_run_checks(
 /// This only marks the RUN cancelled — the frontend's own `AbortController`
 /// for the in-flight headless turn (if any) is separately wired to the same
 /// button; see `issueToPrStore.ts`.
+// All verdicts are computed from GitHub's actual check/status API output.
+// Model-generated summaries, missing checks, and pending jobs never mean success.
+fn classify_ci_rollup(value: &Value) -> Result<(String, Vec<CiCheckEvidence>), String> {
+    let entries = value.get("statusCheckRollup").and_then(Value::as_array)
+        .ok_or_else(|| "GitHub did not return a statusCheckRollup array".to_string())?;
+    if entries.len() > 512 {
+        return Err("GitHub returned too many CI checks".to_string());
+    }
+    let mut checks = Vec::new();
+    let mut failed = false;
+    let mut pending = entries.is_empty();
+    let mut success_count = 0usize;
+    for entry in entries {
+        let name = entry.get("name").or_else(|| entry.get("context"))
+            .and_then(Value::as_str).unwrap_or("unnamed").chars().take(160).collect();
+        let state = entry.get("status").or_else(|| entry.get("state"))
+            .and_then(Value::as_str).unwrap_or("UNKNOWN").to_ascii_uppercase();
+        let conclusion = entry.get("conclusion").or_else(|| entry.get("state"))
+            .and_then(Value::as_str).unwrap_or("PENDING").to_ascii_uppercase();
+        let url = entry.get("detailsUrl").or_else(|| entry.get("targetUrl"))
+            .and_then(Value::as_str).filter(|url| url.starts_with("https://github.com/"))
+            .map(|url| bounded(url, 1024));
+        let result = match conclusion.as_str() {
+            "SUCCESS" if state == "COMPLETED" || state == "SUCCESS" => {
+                success_count += 1;
+                "pass"
+            }
+            "SKIPPED" | "NEUTRAL" if state == "COMPLETED" => "skip",
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" |
+            "CANCELLED" | "STARTUP_FAILURE" => {
+                failed = true;
+                "fail"
+            }
+            _ => {
+                pending = true;
+                "pending"
+            }
+        };
+        checks.push(CiCheckEvidence {
+            name,
+            state,
+            conclusion: if result == "pending" { "PENDING".to_string() } else { conclusion },
+            url,
+        });
+    }
+    let verdict = if failed {
+        "failed"
+    } else if pending || success_count == 0 {
+        "pending"
+    } else {
+        "passed"
+    };
+    Ok((verdict.to_string(), checks))
+}
+
+/// GitHub registers multiple Actions workflows asynchronously. A single
+/// momentarily green rollup can precede another workflow's first check.
+/// Require unchanged successful contexts for two observations separated by
+/// at least 30 seconds, keeping the first observation durable across restart.
+const CI_GREEN_SETTLE_MS: u64 = 30_000;
+
+fn settled_ci_verdict(
+    raw_verdict: &str,
+    head_oid: &str,
+    checks: &[CiCheckEvidence],
+    previous: Option<&CiObservation>,
+    now: u64,
+) -> String {
+    if raw_verdict != "passed" { return raw_verdict.to_string(); }
+    match previous {
+        Some(last) if last.head_oid == head_oid && last.checks == checks
+            && (last.verdict == "passed"
+                || (last.verdict == "pending"
+                    && now.saturating_sub(last.observed_at_ms) >= CI_GREEN_SETTLE_MS)) =>
+                "passed".to_string(),
+        _ => "pending".to_string(),
+    }
+}
+
+#[tauri::command]
+pub fn issue_to_pr_set_repair_limit(
+    app: AppHandle,
+    run_id: String,
+    max_attempts: u32,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
+    if max_attempts > 5 {
+        return Err("Repair limit must be between 0 and 5".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path)?;
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "planning" || run.repair_attempts != 0 {
+        return Err("Repair policy is frozen after planning".to_string());
+    }
+    run.max_repair_attempts = max_attempts;
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// Execution policy is immutable once the run leaves planning.
+#[tauri::command]
+pub fn issue_to_pr_set_execution_budget(
+    app: AppHandle,
+    run_id: String,
+    agent_wall_time_ms: u64,
+    total_token_budget: u64,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
+    if !(60_000..=2 * 60 * 60_000).contains(&agent_wall_time_ms) {
+        return Err("Per-agent wall budget must be between 1 and 120 minutes".to_string());
+    }
+    if !(10_000..=2_000_000).contains(&total_token_budget) {
+        return Err("Total token budget must be between 10000 and 2000000".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path)?;
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "planning" || run.tokens_used > 0 || run.repair_attempts > 0 {
+        return Err("Agent budgets are frozen once execution has started".to_string());
+    }
+    run.agent_wall_time_ms = agent_wall_time_ms;
+    run.total_token_budget = total_token_budget;
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// Charge actual provider-reported token usage immediately after a model
+/// response, before permitting any subsequent tool execution. The run-id +
+/// iteration key is replay-safe across desktop restarts. No model claim can
+/// reset a token budget or grant additional attempts.
+#[tauri::command]
+pub fn issue_to_pr_charge_tokens(
+    app: AppHandle,
+    run_id: String,
+    usage_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
+    m5_delivery::validate_id("usage id", &usage_id)?;
+    if input_tokens > 10_000_000 || output_tokens > 10_000_000 {
+        return Err("Unreasonable token accounting event rejected".to_string());
+    }
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path)?;
+    let mut run = require_run(&runs, &run_id)?;
+    if run.usage_event_ids.iter().any(|id| id == &usage_id) {
+        return Ok(run);
+    }
+    if is_terminal(&run.status) || !matches!(run.status.as_str(), "implementing" | "checking" | "repairing") {
+        return Err("Cannot charge model tokens outside an active issue execution stage".to_string());
+    }
+    let increment = input_tokens.checked_add(output_tokens)
+        .ok_or_else(|| "Token accounting overflow".to_string())?;
+    run.tokens_used = run.tokens_used.checked_add(increment)
+        .ok_or_else(|| "Token budget overflow".to_string())?;
+    run.usage_event_ids.push(usage_id);
+    if run.usage_event_ids.len() > 4_096 {
+        // Fail closed rather than forgetting idempotency IDs and recharging a
+        // replayed event from the same long-lived run.
+        run.status = "failed".to_string();
+        run.error = Some("Maximum token-accounting event count reached".to_string());
+    }
+    if run.tokens_used > run.total_token_budget {
+        run.status = "failed".to_string();
+        run.error = Some("Frozen total model token budget exhausted".to_string());
+    }
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    if run.status == "failed" {
+        return Err(run.error.clone().unwrap_or_else(|| "Token accounting failed".to_string()));
+    }
+    Ok(run)
+}
+
+/// A repair attempt has an idempotent start marker. After a process crash the
+/// same attempt resumes without consuming an additional budget unit.
+#[tauri::command]
+pub fn issue_to_pr_begin_repair(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
+    let path = runs_path()?;
+    let mut runs = load_runs_from(&path)?;
+    let mut run = require_run(&runs, &run_id)?;
+    if run.status != "repairing" {
+        return Err("Only a run with failed verification may begin repair".to_string());
+    }
+    if !run.repair_in_progress {
+        if run.repair_attempts >= run.max_repair_attempts {
+            return Err("Repair attempt limit exhausted".to_string());
+        }
+        run.repair_attempts += 1;
+        run.repair_in_progress = true;
+    }
+    run.updated_at_ms = now_ms()?;
+    runs.insert(run.run_id.clone(), run.clone());
+    save_runs_to(&path, &runs)?;
+    emit_progress(&app, &run);
+    Ok(run)
+}
+
+/// Read-only CI polling is fenced to the actual, still-owned draft PR head.
+/// Unknown statuses and absent checks remain pending. No model result can
+/// change CI to ready. Only a completed GitHub check rollup can do that.
+#[tauri::command]
+pub fn issue_to_pr_poll_ci(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
+    poll_ci_shared(&run_id, |run| emit_progress(&app, run))
+}
+
+/// The same authenticated, read-only GitHub observer used by the desktop.
+/// No Tauri handle, window or frontend is necessary; the installed daemon
+/// invokes it after restart using the persisted owned-worktree run identity.
+pub fn issue_to_pr_poll_ci_headless(run_id: &str) -> Result<IssueToPrRun, String> {
+    poll_ci_shared(run_id, |_| {})
+}
+
+fn persist_ci_update(
+    path: &Path,
+    baseline: &IssueToPrRun,
+    mut update: IssueToPrRun,
+    notify: &impl Fn(&IssueToPrRun),
+) -> Result<IssueToPrRun, String> {
+    // GitHub/network reads take place WITHOUT locking the run file.
+    // Compare the entire baseline after reacquiring the cross-process lock:
+    // cancellation, a newer desktop poll or repair must always win.
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(path)?;
+    let current = require_run(&runs, &baseline.run_id)?;
+    if current != *baseline { return Ok(current); }
+    update.updated_at_ms = now_ms()?;
+    runs.insert(update.run_id.clone(), update.clone());
+    save_runs_to(path, &runs)?;
+    drop(_guard);
+    notify(&update);
+    Ok(update)
+}
+
+fn poll_ci_shared(run_id: &str, notify: impl Fn(&IssueToPrRun)) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", run_id)?;
+    let path = runs_path()?;
+    let baseline = {
+        let _guard = lock_runs()?;
+        let runs = load_runs_from(&path)?;
+        require_run(&runs, run_id)?
+    };
+    let mut run = baseline.clone();
+    if run.status != "monitoring_ci" && run.status != "ready" {
+        return Err("CI monitoring requires an owned draft PR awaiting checks".to_string());
+    }
+    let number = run.pr_number.ok_or_else(|| "Missing draft PR number".to_string())?;
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(run.worktree_id.clone())?;
+    if inspection.worktree.marker.branch != run.branch
+        || inspection.worktree.marker.repository_slug != run.repository_slug
+        || inspection.dirty
+    {
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("Owned worktree identity changed or local files are dirty. Reconcile before CI readiness.".to_string());
+        return persist_ci_update(&path, &baseline, run, &notify);
+    }
+    if !reviewed_delivery_state_matches(&run, &inspection)? {
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("Committed file scope or bytes changed after independent review".to_string());
+        return persist_ci_update(&path, &baseline, run, &notify);
+    }
+    let pr = m5_delivery::m5_github_pull_request(run.worktree_id.clone(), number)?;
+    if pr.get("isDraft").and_then(Value::as_bool) != Some(true)
+        || pr.get("state").and_then(Value::as_str) != Some("OPEN")
+        || pr.get("isCrossRepository").and_then(Value::as_bool) != Some(false)
+        || pr.get("headRefName").and_then(Value::as_str) != Some(run.branch.as_str())
+        || (run.base_ref != "HEAD"
+            && pr.get("baseRefName").and_then(Value::as_str) != Some(run.base_ref.as_str()))
+    {
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("PR draft/ownership/base state changed; reconcile before readiness or final approval".to_string());
+        return persist_ci_update(&path, &baseline, run, &notify);
+    }
+    let head_oid = pr.get("headRefOid").and_then(Value::as_str)
+        .ok_or_else(|| "GitHub did not return the draft PR head".to_string())?;
+    if inspection.head_oid != head_oid {
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("Draft PR head differs from the owned local branch; manual reconciliation required".to_string());
+        return persist_ci_update(&path, &baseline, run, &notify);
+    }
+    let rollup = m5_delivery::m5_github_checks(run.worktree_id.clone(), number)?;
+    if rollup.get("headRefOid").and_then(Value::as_str) != Some(head_oid) {
+        run.status = "monitoring_ci".to_string();
+        run.ci_head_oid = None;
+        run.error = Some("GitHub CI snapshot is for a stale PR head".to_string());
+        return persist_ci_update(&path, &baseline, run, &notify);
+    }
+    let (mut verdict, mut checks) = classify_ci_rollup(&rollup)?;
+    checks.sort_by(|a, b| (&a.name, &a.state, &a.conclusion, &a.url)
+        .cmp(&(&b.name, &b.state, &b.conclusion, &b.url)));
+    if verdict == "passed" && (run.review_evidence.is_none() || run.checks.is_empty() || !run.checks.iter().all(|c| c.passed && c.code == Some(0))) {
+        verdict = "pending".to_string();
+    }
+    let observed_at_ms = now_ms()?;
+    // A transient outage, changed PR identity or stale SHA clears
+    // ci_head_oid. An old green snapshot cannot count as the first of two
+    // post-recovery observations; re-establish the 30-second settling window.
+    let previous_same_head = if run.ci_head_oid.as_deref() == Some(head_oid) {
+        run.ci_history.last()
+    } else {
+        None
+    };
+    verdict = settled_ci_verdict(&verdict, head_oid, &checks, previous_same_head, observed_at_ms);
+    let observation = CiObservation {
+        head_oid: head_oid.to_string(),
+        verdict: verdict.clone(),
+        checks,
+        observed_at_ms,
+    };
+    // Deduplicate repeated GitHub event deliveries and polls by SHA + verdict + check details.
+    let repeated = run.ci_history.last().map(|last|
+        last.head_oid == observation.head_oid
+        && last.verdict == observation.verdict
+        && last.checks == observation.checks
+    ).unwrap_or(false);
+    if !repeated {
+        run.ci_history.push(observation);
+        if run.ci_history.len() > CI_HISTORY_CAP {
+            run.ci_history.remove(0);
+        }
+    }
+    run.ci_head_oid = Some(head_oid.to_string());
+    run.status = match verdict.as_str() {
+        "passed" => "ready",
+        "failed" if run.repair_attempts < run.max_repair_attempts => "repairing",
+        "failed" => "failed",
+        _ => "monitoring_ci",
+    }.to_string();
+    if verdict == "failed" {
+        run.error = Some("GitHub CI failed on the current owned head; investigate failed checks before a bounded repair.".to_string());
+    } else {
+        // A successful pending read clears a previous transient transport
+        // error while preserving the real GitHub check history.
+        run.error = None;
+    }
+    persist_ci_update(&path, &baseline, run, &notify)
+}
+
+const CI_MONITOR_UNAVAILABLE: &str =
+    "Daemon CI observation temporarily unavailable; GitHub authentication, network or worktree must recover.";
+
+fn select_monitorable_runs(runs: &RunMap, max: usize) -> Vec<String> {
+    let mut candidates = runs.values()
+        .filter(|run| matches!(run.status.as_str(), "monitoring_ci" | "ready")
+            && run.pr_number.is_some())
+        .collect::<Vec<_>>();
+    // Bounded fair scheduling: every attempted observation (including repeated
+    // identical network errors) updates its time, so an offline run cannot
+    // monopolize the first eight slots and starve later draft PRs.
+    candidates.sort_by(|a, b| (a.updated_at_ms, &a.run_id)
+        .cmp(&(b.updated_at_ms, &b.run_id)));
+    candidates.into_iter().take(max).map(|run| run.run_id.clone()).collect()
+}
+
+/// Daemon-side discovery performs no GitHub calls when no run is monitoring.
+/// Runs are already persisted in the desktop profile's issue-to-PR ledger.
+pub fn issue_to_pr_monitorable_run_ids(limit: usize) -> Result<Vec<String>, String> {
+    let _guard = lock_runs()?;
+    let path = runs_path()?;
+    Ok(select_monitorable_runs(&load_runs_from(&path)?, limit.min(32)))
+}
+
+/// Network errors do not consume CI-repair attempts or falsely terminate a
+/// verified run. They do revoke previously ready evidence until GitHub can
+/// be queried again. Final publication always needs another live CI check.
+fn revoke_unavailable_ci(run: &mut IssueToPrRun) -> bool {
+    if !matches!(run.status.as_str(), "monitoring_ci" | "ready") { return false; }
+    if run.status == "monitoring_ci" && run.error.as_deref() == Some(CI_MONITOR_UNAVAILABLE) {
+        return false;
+    }
+    run.status = "monitoring_ci".to_string();
+    run.ci_head_oid = None;
+    run.error = Some(CI_MONITOR_UNAVAILABLE.to_string());
+    true
+}
+
+fn record_monitor_unavailable_at(path: &Path, run_id: &str) -> Result<(), String> {
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(path)?;
+    let mut run = require_run(&runs, run_id)?;
+    if !matches!(run.status.as_str(), "monitoring_ci" | "ready") { return Ok(()); }
+    // Even when the same error is already present, rotate this run to the
+    // back of the durable fair queue. Otherwise eight disconnected PRs can
+    // indefinitely starve every newer one (including across daemon restarts).
+    revoke_unavailable_ci(&mut run);
+    run.updated_at_ms = now_ms()?.max(run.updated_at_ms.saturating_add(1));
+    runs.insert(run.run_id.clone(), run);
+    save_runs_to(path, &runs)
+}
+
+pub fn issue_to_pr_monitor_unavailable(run_id: &str) -> Result<(), String> {
+    m5_delivery::validate_id("run id", run_id)?;
+    record_monitor_unavailable_at(&runs_path()?, run_id)
+}
+
+/// Returns only a single draft PR on this repository's exact owned branch,
+/// base branch and local HEAD. A same-named fork or stale/ready-for-review PR
+/// cannot be adopted as the run's remotely-created draft.
+fn find_matching_owned_draft_pr(
+    entries: &[Value],
+    run: &IssueToPrRun,
+    head_oid: &str,
+) -> Result<Option<(u32, String)>, String> {
+    let mut match_found = None;
+    for entry in entries {
+        let matches = entry.get("draft").and_then(Value::as_bool) == Some(true)
+            && entry.get("state").and_then(Value::as_str) == Some("open")
+            && entry.pointer("/head/ref").and_then(Value::as_str) == Some(run.branch.as_str())
+            && entry.pointer("/head/sha").and_then(Value::as_str) == Some(head_oid)
+            && entry.pointer("/head/repo/full_name").and_then(Value::as_str) == Some(run.repository_slug.as_str())
+            && entry.pointer("/base/ref").and_then(Value::as_str) == Some(run.base_ref.as_str())
+            && entry.pointer("/base/repo/full_name").and_then(Value::as_str) == Some(run.repository_slug.as_str());
+        if !matches { continue; }
+        let number = entry.get("number").and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()).filter(|n| *n != 0)
+            .ok_or_else(|| "GitHub returned an invalid matching PR number".to_string())?;
+        let url = format!("https://github.com/{}/pull/{number}", run.repository_slug);
+        if match_found.is_some() {
+            return Err("Multiple matching owned draft PRs exist; manual reconciliation required".to_string());
+        }
+        match_found = Some((number, url));
+    }
+    Ok(match_found)
+}
+
+/// Recover the identity of a PR already created by an approved GitHub write
+/// if the desktop crashed between GitHub success and local record persistence.
+/// Read-only GitHub discovery; never creates, pushes, merges or changes PRs.
+#[tauri::command]
+pub fn issue_to_pr_reconcile_pr(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
+    reconcile_pr_shared(&run_id, |run| emit_progress(&app, run))
+}
+
+/// Recover a draft PR already created through approved delivery when the
+/// desktop disappeared before recording its identity. Daemon and desktop use
+/// the identical read-only check; neither creates another PR.
+pub fn issue_to_pr_reconcile_pr_headless(run_id: &str) -> Result<IssueToPrRun, String> {
+    reconcile_pr_shared(run_id, |_| {})
+}
+
+fn reconcile_pr_shared(run_id: &str, notify: impl Fn(&IssueToPrRun)) -> Result<IssueToPrRun, String> {
+    m5_delivery::validate_id("run id", run_id)?;
+    let path = runs_path()?;
+    let baseline = {
+        let _guard = lock_runs()?;
+        require_run(&load_runs_from(&path)?, run_id)?
+    };
+    if baseline.status != "opening_pr" || baseline.pr_number.is_some() { return Ok(baseline); }
+    let inspection = m5_delivery::m5_delivery_inspect_worktree(baseline.worktree_id.clone())?;
+    if inspection.dirty || inspection.worktree.marker.repository_slug != baseline.repository_slug
+        || inspection.worktree.marker.branch != baseline.branch
+        || !reviewed_delivery_state_matches(&baseline, &inspection)?
+    {
+        return Ok(baseline); // No unreviewed/dirty branch can enter CI monitoring.
+    }
+    let endpoint = format!("repos/{}/pulls?state=open&per_page=100", baseline.repository_slug);
+    let entries = m5_delivery::m5_github_api_get_paginated(&endpoint, 400)?;
+    if let Some((number, url)) = find_matching_owned_draft_pr(&entries, &baseline, &inspection.head_oid)? {
+        let mut update = baseline.clone();
+        update.pr_number = Some(number);
+        update.pr_url = Some(url);
+        update.status = "monitoring_ci".to_string();
+        // This CAS drops a stale remote response when the desktop cancelled,
+        // pushed a different commit or already adopted the PR meanwhile.
+        return persist_ci_update(&path, &baseline, update, &notify);
+    }
+    Ok(baseline)
+}
+
+/// Bounded read-only reconciliation candidates for the unattended daemon.
+/// Normal monitoring runs take priority; these require a still-missing PR
+/// number and cannot initiate a GitHub write.
+fn select_reconcilable_runs(runs: &RunMap, limit: usize) -> Vec<String> {
+    let mut candidates = runs.values()
+        .filter(|run| run.status == "opening_pr" && run.pr_number.is_none())
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| (a.updated_at_ms, &a.run_id).cmp(&(b.updated_at_ms, &b.run_id)));
+    candidates.into_iter().take(limit.min(8)).map(|run| run.run_id.clone()).collect()
+}
+
+pub fn issue_to_pr_reconcilable_run_ids(limit: usize) -> Result<Vec<String>, String> {
+    let _guard = lock_runs()?;
+    Ok(select_reconcilable_runs(&load_runs_from(&runs_path()?)?, limit))
+}
+
+/// Persist an attempted read-only draft-PR reconciliation even when no PR is
+/// found or GitHub is unavailable. This is only a scheduling observation:
+/// no run state, approval, repair budget, or GitHub identity is changed.
+/// Updating the existing run timestamp makes the two-slot daemon scan fair
+/// over multiple passes and preserves that progress across service restarts.
+fn record_reconciliation_probe_at(path: &Path, run_id: &str) -> Result<(), String> {
+    let _guard = lock_runs()?;
+    let mut runs = load_runs_from(path)?;
+    let mut run = require_run(&runs, run_id)?;
+    if run.status != "opening_pr" || run.pr_number.is_some() { return Ok(()); }
+    run.updated_at_ms = now_ms()?.max(run.updated_at_ms.saturating_add(1));
+    runs.insert(run.run_id.clone(), run);
+    save_runs_to(path, &runs)
+}
+
+pub fn issue_to_pr_reconciliation_observed(run_id: &str) -> Result<(), String> {
+    m5_delivery::validate_id("run id", run_id)?;
+    record_reconciliation_probe_at(&runs_path()?, run_id)
+}
+
 #[tauri::command]
 pub fn issue_to_pr_cancel(app: AppHandle, run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
+    let _guard = lock_runs()?;
     let path = runs_path()?;
-    let mut runs = load_runs_from(&path);
+    let mut runs = load_runs_from(&path)?;
     let mut run = require_run(&runs, &run_id)?;
     if is_terminal(&run.status) {
         return Ok(run);
@@ -659,13 +1788,13 @@ pub fn issue_to_pr_cancel(app: AppHandle, run_id: String) -> Result<IssueToPrRun
 pub fn issue_to_pr_status(run_id: String) -> Result<IssueToPrRun, String> {
     m5_delivery::validate_id("run id", &run_id)?;
     let path = runs_path()?;
-    require_run(&load_runs_from(&path), &run_id)
+    require_run(&load_runs_from(&path)?, &run_id)
 }
 
 #[tauri::command]
 pub fn issue_to_pr_list() -> Result<Vec<IssueToPrRun>, String> {
     let path = runs_path()?;
-    let mut runs: Vec<IssueToPrRun> = load_runs_from(&path).into_values().collect();
+    let mut runs: Vec<IssueToPrRun> = load_runs_from(&path)?.into_values().collect();
     runs.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
     Ok(runs)
 }
@@ -695,6 +1824,7 @@ mod tests {
             issue_number,
             issue_title: "Fixture issue".to_string(),
             issue_body: "Body".to_string(),
+            issue_comments: Vec::new(),
             worktree_id: format!("wt-{created_at_ms}"),
             branch: "issue-to-pr/fixture".to_string(),
             base_ref: "develop".to_string(),
@@ -703,11 +1833,308 @@ mod tests {
             pr_number: None,
             pr_url: None,
             checks: Vec::new(),
+            verification_generation: 0,
+            verification_in_progress: false,
+            review_evidence: None,
+            ci_history: Vec::new(),
+            ci_head_oid: None,
+            repair_attempts: 0,
+            max_repair_attempts: MAX_REPAIR_ATTEMPTS,
+            repair_in_progress: false,
+            agent_wall_time_ms: default_agent_wall_time_ms(),
+            total_token_budget: default_total_token_budget(),
+            tokens_used: 0,
+            usage_event_ids: Vec::new(),
             error: None,
             durable_run_id: None,
             created_at_ms,
             updated_at_ms: created_at_ms,
         }
+    }
+
+    #[test]
+    fn untracked_file_contents_are_part_of_verified_revision_even_when_size_is_unchanged() {
+        let root = std::env::temp_dir().join(format!("lm-i2p-untracked-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let init = std::process::Command::new("git").arg("-C").arg(&root)
+            .args(["init", "-q"]).status().unwrap();
+        assert!(init.success(), "real Git fixture must initialize");
+        let file = root.join("nested").join("feature.ts");
+        std::fs::write(&file, b"enabled=false\n").unwrap();
+        let fingerprint = || {
+            let mut hash = Sha256::new();
+            hash_untracked_contents(&root, &mut hash).unwrap();
+            format!("{:x}", hash.finalize())
+        };
+        let before = fingerprint();
+        std::fs::write(&file, b"enabled=true \n").unwrap();
+        let after = fingerprint();
+        assert_ne!(before, after, "untracked byte changes must invalidate check/review evidence");
+        assert_eq!(after, fingerprint(), "unchanged untracked bytes must be stable");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_symlink_cannot_smuggle_outside_file_into_review_fingerprint() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("lm-i2p-untracked-link-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&root)
+            .args(["init", "-q"]).status().unwrap().success());
+        symlink("/etc/hosts", root.join("outside-link")).unwrap();
+        let mut hasher = Sha256::new();
+        let result = hash_untracked_contents(&root, &mut hasher);
+        assert!(result.is_err(), "untracked symlink must fail closed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn daemon_only_reconciles_unrecorded_draft_pr_runs_and_never_replays_creation() {
+        let mut runs = RunMap::new();
+        let mut needs_recovery = fixture_run("owner/repo", 42, 1, "opening_pr");
+        needs_recovery.pr_number = None;
+        let run_id = needs_recovery.run_id.clone();
+        runs.insert(run_id.clone(), needs_recovery);
+        let mut already_tracked = fixture_run("owner/repo", 43, 2, "opening_pr");
+        already_tracked.pr_number = Some(43);
+        runs.insert(already_tracked.run_id.clone(), already_tracked);
+        for (n, status) in ["monitoring_ci", "ready", "cancelled", "failed", "done"].iter().enumerate() {
+            let run = fixture_run("owner/repo", n as u32 + 50, n as u64 + 3, status);
+            runs.insert(run.run_id.clone(), run);
+        }
+        let path = temp_path("reconcile-candidate-restart.json");
+        save_runs_to(&path, &runs).unwrap();
+        let persisted = load_runs_from(&path).unwrap();
+        let candidates = persisted.values()
+            .filter(|run| run.status == "opening_pr" && run.pr_number.is_none())
+            .map(|run| run.run_id.clone()).collect::<Vec<_>>();
+        assert_eq!(candidates, vec![run_id]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_unavailable_poll_requeues_identical_errors_without_reviving_terminal_runs() {
+        let path = temp_path("daemon-offline-round-robin.json");
+        let mut runs = RunMap::new();
+        for n in 1..=12_u64 {
+            let mut run = fixture_run("owner/repo", n as u32, n, "monitoring_ci");
+            run.pr_number = Some(n as u32);
+            runs.insert(run.run_id.clone(), run);
+        }
+        save_runs_to(&path, &runs).unwrap();
+        let first = select_monitorable_runs(&load_runs_from(&path).unwrap(), 8);
+        for id in &first {
+            record_monitor_unavailable_at(&path, id).unwrap();
+            // A repeated identical failure still receives a fresh timestamp.
+            record_monitor_unavailable_at(&path, id).unwrap();
+        }
+        let persisted = load_runs_from(&path).unwrap();
+        let second = select_monitorable_runs(&persisted, 8);
+        assert!(second.iter().any(|id| !first.contains(id)),
+            "persistent gh failures must not starve newer draft PRs");
+        for id in &first {
+            let run = &persisted[id];
+            assert_eq!(run.status, "monitoring_ci");
+            assert!(run.ci_head_oid.is_none());
+            assert_eq!(run.error.as_deref(), Some(CI_MONITOR_UNAVAILABLE));
+            assert_eq!(run.repair_attempts, 0);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_unmatched_pr_reconciliation_rotates_durably_across_restart() {
+        let path = temp_path("daemon-reconciliation-fairness.json");
+        let mut runs = RunMap::new();
+        for n in 1..=7_u64 {
+            let run = fixture_run("owner/repo", n as u32, n, "opening_pr");
+            runs.insert(run.run_id.clone(), run);
+        }
+        save_runs_to(&path, &runs).unwrap();
+        let first = select_reconcilable_runs(&load_runs_from(&path).unwrap(), 2);
+        assert_eq!(first, vec!["i2p-1", "i2p-2"]);
+        for id in &first { record_reconciliation_probe_at(&path, id).unwrap(); }
+        // Reopening the ledger simulates a new resident daemon process.
+        let recovered = load_runs_from(&path).unwrap();
+        let second = select_reconcilable_runs(&recovered, 2);
+        assert_eq!(second, vec!["i2p-3", "i2p-4"]);
+        for id in &second { record_reconciliation_probe_at(&path, id).unwrap(); }
+        let third = select_reconcilable_runs(&load_runs_from(&path).unwrap(), 2);
+        assert_eq!(third, vec!["i2p-5", "i2p-6"]);
+        // Already-adopted, cancelled or otherwise changed runs must be left untouched.
+        let mut changed = load_runs_from(&path).unwrap();
+        changed.get_mut("i2p-7").unwrap().status = "cancelled".to_string();
+        save_runs_to(&path, &changed).unwrap();
+        record_reconciliation_probe_at(&path, "i2p-7").unwrap();
+        assert_eq!(load_runs_from(&path).unwrap()["i2p-7"], changed["i2p-7"]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_monitor_selects_only_active_owned_pr_runs_and_fairly_rotates() {
+        let mut runs = RunMap::new();
+        for index in 1..=16_u64 {
+            let mut run = fixture_run("owner/repo", index as u32, index, "monitoring_ci");
+            run.pr_number = Some(index as u32);
+            runs.insert(run.run_id.clone(), run);
+        }
+        let mut ready = fixture_run("owner/repo", 50, 0, "ready");
+        ready.pr_number = Some(50);
+        runs.insert(ready.run_id.clone(), ready);
+        let mut no_pr = fixture_run("owner/repo", 51, 200, "monitoring_ci");
+        no_pr.pr_number = None;
+        runs.insert(no_pr.run_id.clone(), no_pr);
+        for (index, status) in ["cancelled", "done", "failed", "repairing", "opening_pr"].iter().enumerate() {
+            let mut excluded = fixture_run("owner/repo", 70 + index as u32, 70 + index as u64, status);
+            excluded.pr_number = Some(70 + index as u32);
+            runs.insert(excluded.run_id.clone(), excluded);
+        }
+        let first = select_monitorable_runs(&runs, 8);
+        assert_eq!(first.len(), 8);
+        assert_eq!(first[0], "i2p-0", "ready runs still need current-head CI monitoring");
+        assert!(!first.contains(&"i2p-70".to_string()));
+        assert!(!first.contains(&"i2p-200".to_string()));
+        assert!(first.contains(&"i2p-1".to_string()));
+        // Durable observation timestamp moves already-observed runs behind
+        // older pending ones, including after a daemon restart.
+        for id in &first {
+            runs.get_mut(id).unwrap().updated_at_ms = 100_000;
+        }
+        let second = select_monitorable_runs(&runs, 8);
+        assert!(second.iter().all(|id| !first.contains(id)));
+        assert!(select_monitorable_runs(&runs, 0).is_empty());
+    }
+
+    #[test]
+    fn daemon_can_persist_and_resume_green_ci_without_a_tauri_app_handle() {
+        let path = temp_path("daemon-unattended-green.json");
+        let head = "a".repeat(40);
+        let checks = vec![CiCheckEvidence {
+            name: "ci / tests".to_string(),
+            state: "COMPLETED".to_string(),
+            conclusion: "SUCCESS".to_string(),
+            url: None,
+        }];
+        let mut initial = fixture_run("owner/repo", 42, 100, "monitoring_ci");
+        initial.pr_number = Some(42);
+        initial.ci_head_oid = Some(head.clone());
+        let mut runs = RunMap::new();
+        runs.insert(initial.run_id.clone(), initial.clone());
+        save_runs_to(&path, &runs).unwrap();
+
+        // First green GitHub snapshot remains pending until a second,
+        // identical observation at least 30 seconds later.
+        let first_verdict = settled_ci_verdict("passed", &head, &checks, None, 1_000);
+        assert_eq!(first_verdict, "pending");
+        let first_observation = CiObservation {
+            head_oid: head.clone(),
+            verdict: first_verdict,
+            checks: checks.clone(),
+            observed_at_ms: 1_000,
+        };
+        let mut first_update = initial.clone();
+        first_update.ci_history.push(first_observation);
+        let first = persist_ci_update(&path, &initial, first_update, &|_| {}).unwrap();
+        assert_eq!(first.status, "monitoring_ci");
+        let recovered = load_runs_from(&path).unwrap()[&initial.run_id].clone();
+        assert_eq!(recovered.ci_history.len(), 1);
+
+        let second_verdict = settled_ci_verdict(
+            "passed", &head, &checks, recovered.ci_history.last(), 31_100,
+        );
+        assert_eq!(second_verdict, "passed");
+        let mut green = recovered.clone();
+        green.ci_history.push(CiObservation {
+            head_oid: head.clone(),
+            verdict: second_verdict,
+            checks,
+            observed_at_ms: 31_100,
+        });
+        green.status = "ready".to_string();
+        let ready = persist_ci_update(&path, &recovered, green, &|_| {}).unwrap();
+        assert_eq!(ready.status, "ready");
+        assert_eq!(ready.ci_history.len(), 2);
+        assert_eq!(load_runs_from(&path).unwrap()[&initial.run_id], ready);
+        assert_ne!(ready.status, "done", "Daemon never publishes or merges a draft PR");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn daemon_network_error_revokes_ready_but_never_consumes_repairs_or_changes_terminal_runs() {
+        let mut ready = fixture_run("owner/repo", 77, 100, "ready");
+        ready.ci_head_oid = Some("a".repeat(40));
+        ready.repair_attempts = 1;
+        ready.max_repair_attempts = 2;
+        assert!(revoke_unavailable_ci(&mut ready));
+        assert_eq!(ready.status, "monitoring_ci");
+        assert!(ready.ci_head_oid.is_none());
+        assert_eq!(ready.repair_attempts, 1);
+        assert_eq!(ready.max_repair_attempts, 2);
+        assert_eq!(ready.error.as_deref(), Some(CI_MONITOR_UNAVAILABLE));
+        assert!(!revoke_unavailable_ci(&mut ready), "Repeated outage is idempotent");
+        ready.status = "cancelled".into();
+        assert!(!revoke_unavailable_ci(&mut ready), "Cancelled runs cannot be revived");
+        ready.status = "repairing".into();
+        assert!(!revoke_unavailable_ci(&mut ready), "Daemon cannot start or consume model repair");
+    }
+
+    #[test]
+    fn stale_daemon_ci_poll_cannot_resurrect_cancelled_run_or_replace_desktop_state() {
+        let path = temp_path("stale-daemon-ci-poll.json");
+        let mut baseline = fixture_run("owner/repo", 42, 1, "monitoring_ci");
+        baseline.pr_number = Some(42);
+        let mut runs = RunMap::new();
+        runs.insert(baseline.run_id.clone(), baseline.clone());
+        save_runs_to(&path, &runs).unwrap();
+        // The daemon read its baseline, then a desktop process cancelled.
+        let mut cancelled = baseline.clone();
+        cancelled.status = "cancelled".to_string();
+        cancelled.updated_at_ms += 1;
+        runs.insert(cancelled.run_id.clone(), cancelled.clone());
+        save_runs_to(&path, &runs).unwrap();
+
+        let mut stale_green = baseline.clone();
+        stale_green.status = "ready".to_string();
+        let mut notifications = 0;
+        let persisted = persist_ci_update(&path, &baseline, stale_green, &|_| {
+            // stale observations must never emit a progress event.
+        }).unwrap();
+        if persisted.status == "ready" { notifications += 1; }
+        assert_eq!(notifications, 0);
+        assert_eq!(persisted, cancelled);
+        assert_eq!(load_runs_from(&path).unwrap()[&baseline.run_id], cancelled);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_second_process_cannot_lock_issue_state_while_the_first_holds_it() {
+        let path = temp_path("cross-process-run-lock.json");
+        let locked = acquire_run_store_file_lock(&path).unwrap();
+        let lock_path = path.with_extension("json.lock");
+        let second = std::fs::OpenOptions::new()
+            .read(true).write(true).open(&lock_path).unwrap();
+        assert!(matches!(second.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "OS lock must block a second file descriptor, even across processes");
+        drop(locked);
+        assert!(second.try_lock().is_ok(), "released file lock permits another writer");
+        drop(second);
+        std::fs::remove_file(lock_path).unwrap();
+    }
+
+    #[test]
+    fn issue_start_deduplicates_only_the_latest_nonterminal_run_for_same_issue() {
+        let done = fixture_run("owner/repo", 42, 10, "done");
+        let earlier = fixture_run("owner/repo", 42, 20, "checking");
+        let latest = fixture_run("owner/repo", 42, 30, "monitoring_ci");
+        let different_repo = fixture_run("elsewhere/repo", 42, 40, "implementing");
+        let different_issue = fixture_run("owner/repo", 43, 50, "implementing");
+        let runs = vec![done, earlier, latest.clone(), different_repo, different_issue];
+        assert_eq!(find_active_issue_run(&runs, "OWNER/REPO", 42).map(|r| &r.run_id),
+            Some(&latest.run_id));
+        assert!(find_active_issue_run(&runs, "owner/repo", 99).is_none());
+        assert!(find_active_issue_run(&runs, "unrelated/repo", 42).is_none());
+        assert!(find_active_issue_run(&[fixture_run("owner/repo", 42, 10, "done")], "owner/repo", 42).is_none());
     }
 
     #[test]
@@ -746,7 +2173,7 @@ mod tests {
         assert!(valid_transition("implementing", "checking"));
         assert!(valid_transition("checking", "opening_pr"));
         assert!(valid_transition("opening_pr", "awaiting_review"));
-        assert!(valid_transition("awaiting_review", "done"));
+        assert!(!valid_transition("awaiting_review", "done")); // CI verification is mandatory
         assert!(!valid_transition("planning", "checking"));
         assert!(!valid_transition("planning", "opening_pr"));
         assert!(!valid_transition("implementing", "awaiting_review"));
@@ -841,11 +2268,314 @@ mod tests {
             commands,
             vec![
                 ("test".to_string(), "pnpm run test".to_string()),
+                ("lint".to_string(), "pnpm run lint".to_string()),
                 ("build".to_string(), "pnpm run build".to_string()),
             ]
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ci_verdict_uses_real_check_conclusions_and_never_accepts_missing_checks() {
+        let missing = serde_json::json!({"statusCheckRollup":[]});
+        assert_eq!(classify_ci_rollup(&missing).unwrap().0, "pending");
+        let pending = serde_json::json!({"statusCheckRollup":[
+            {"name":"unit","status":"IN_PROGRESS","conclusion":null}
+        ]});
+        assert_eq!(classify_ci_rollup(&pending).unwrap().0, "pending");
+        let failed = serde_json::json!({"statusCheckRollup":[
+            {"name":"test","status":"COMPLETED","conclusion":"FAILURE"},
+            {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}
+        ]});
+        assert_eq!(classify_ci_rollup(&failed).unwrap().0, "failed");
+        let passed = serde_json::json!({"statusCheckRollup":[
+            {"name":"test","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"name":"lint","status":"COMPLETED","conclusion":"SUCCESS"}
+        ]});
+        assert_eq!(classify_ci_rollup(&passed).unwrap().0, "passed");
+        let skipped = serde_json::json!({"statusCheckRollup":[
+            {"name":"disabled","status":"COMPLETED","conclusion":"SKIPPED"}
+        ]});
+        assert_eq!(classify_ci_rollup(&skipped).unwrap().0, "pending");
+    }
+
+    #[test]
+    fn existing_draft_pr_recovery_requires_exact_own_repo_branch_base_and_head() {
+        let run = fixture_run("owner/repo", 42, 100, "opening_pr");
+        let head = "a".repeat(40);
+        let candidate = serde_json::json!({
+            "number": 44, "draft": true, "state": "open",
+            "head": { "ref": run.branch, "sha": head,
+                      "repo": { "full_name": "owner/repo" } },
+            "base": { "ref": "develop", "repo": { "full_name": "owner/repo" } }
+        });
+        assert_eq!(find_matching_owned_draft_pr(&[candidate.clone()], &run, &head).unwrap(),
+            Some((44, "https://github.com/owner/repo/pull/44".to_string())));
+        let mut fork = candidate.clone();
+        fork["head"]["repo"]["full_name"] = serde_json::json!("outsider/repo");
+        assert!(find_matching_owned_draft_pr(&[fork], &run, &head).unwrap().is_none());
+        let mut stale = candidate.clone();
+        stale["head"]["sha"] = serde_json::json!("b".repeat(40));
+        assert!(find_matching_owned_draft_pr(&[stale], &run, &head).unwrap().is_none());
+        let mut published = candidate.clone();
+        published["draft"] = serde_json::json!(false);
+        assert!(find_matching_owned_draft_pr(&[published], &run, &head).unwrap().is_none());
+        let mut wrong_base = candidate.clone();
+        wrong_base["base"]["ref"] = serde_json::json!("main");
+        assert!(find_matching_owned_draft_pr(&[wrong_base], &run, &head).unwrap().is_none());
+        assert!(find_matching_owned_draft_pr(&[candidate.clone(), candidate], &run, &head).is_err());
+    }
+
+    #[test]
+    fn ready_requires_stable_matching_green_ci_observations_and_survives_restart() {
+        let head = "a".repeat(40);
+        let checks = vec![CiCheckEvidence {
+            name: "frontend".to_string(),
+            state: "COMPLETED".to_string(),
+            conclusion: "SUCCESS".to_string(),
+            url: None,
+        }];
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, None, 1_000), "pending");
+        let first = CiObservation {
+            head_oid: head.clone(),
+            verdict: "pending".to_string(),
+            checks: checks.clone(),
+            observed_at_ms: 1_000,
+        };
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&first), 30_999), "pending");
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&first), 31_000), "passed");
+        let persisted: CiObservation =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&persisted), 31_000), "passed");
+        let mut extra = checks.clone();
+        extra.push(CiCheckEvidence {
+            name: "new delayed job".to_string(),
+            state: "COMPLETED".to_string(),
+            conclusion: "SUCCESS".to_string(),
+            url: None,
+        });
+        assert_eq!(settled_ci_verdict("passed", &head, &extra, Some(&persisted), 31_000), "pending");
+        assert_eq!(settled_ci_verdict("passed", &"b".repeat(40), &checks, Some(&persisted), 31_000), "pending");
+        assert_eq!(settled_ci_verdict("failed", &head, &checks, Some(&persisted), 31_000), "failed");
+        let accepted = CiObservation { verdict: "passed".to_string(), ..persisted };
+        assert_eq!(settled_ci_verdict("passed", &head, &checks, Some(&accepted), 31_100), "passed");
+    }
+
+    #[test]
+    fn verification_generation_survives_restart_and_fences_outdated_checks() {
+        let mut run = fixture_run("owner/repo", 42, 1, "checking");
+        run.verification_generation = 2;
+        run.verification_in_progress = true;
+        let recovered: IssueToPrRun = serde_json::from_str(
+            &serde_json::to_string(&run).unwrap()
+        ).unwrap();
+        assert!(is_current_verification(&recovered, 2));
+        let mut cancelled = recovered.clone();
+        cancelled.status = "cancelled".to_string();
+        assert!(!is_current_verification(&cancelled, 2), "cancelled run must not be revived");
+        let mut superseded = recovered;
+        superseded.verification_generation += 1;
+        assert!(!is_current_verification(&superseded, 2), "older subprocess may not publish results");
+        let mut completed = superseded;
+        completed.verification_in_progress = false;
+        assert!(!is_current_verification(&completed, completed.verification_generation),
+            "a finished verifier must not reuse old evidence");
+    }
+
+    #[test]
+    fn ci_repair_record_survives_storage_restart_without_losing_failure_evidence() {
+        let path = temp_path("ci-restart.json");
+        let mut run = fixture_run("owner/repo", 14, 1_000, "repairing");
+        run.pr_number = Some(8);
+        run.repair_attempts = 1;
+        run.repair_in_progress = true;
+        run.ci_head_oid = Some("a".repeat(40));
+        run.ci_history.push(CiObservation {
+            head_oid: "a".repeat(40),
+            verdict: "failed".to_string(),
+            checks: vec![CiCheckEvidence {
+                name: "CI".to_string(),
+                state: "COMPLETED".to_string(),
+                conclusion: "FAILURE".to_string(),
+                url: None,
+            }],
+            observed_at_ms: 1_000,
+        });
+        let mut store = RunMap::new();
+        store.insert(run.run_id.clone(), run.clone());
+        save_runs_to(&path, &store).unwrap();
+        let recovered = load_runs_from(&path).unwrap();
+        assert_eq!(recovered.get(&run.run_id), Some(&run));
+        assert_eq!(recovered[&run.run_id].max_repair_attempts, 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn new_ci_transitions_require_evidence_and_explicit_approval_boundary() {
+        assert!(valid_transition("opening_pr", "monitoring_ci"));
+        assert!(valid_transition("monitoring_ci", "repairing"));
+        assert!(valid_transition("repairing", "checking"));
+        assert!(valid_transition("checking", "opening_pr"));
+        assert!(valid_transition("monitoring_ci", "ready"));
+        assert!(valid_transition("ready", "done"));
+        assert!(!valid_transition("repairing", "ready"));
+        // The public transition command rejects "ready" even though the
+        // internal CI observer uses this state edge after matching GitHub SHA.
+        assert!(!valid_transition("implementing", "ready"));
+    }
+
+
+    #[test]
+    fn reviewed_content_survives_one_exact_commit_but_rejects_tampering_or_extra_commits() {
+        let root = temp_path("reviewed-commit-recovery");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| -> String {
+            let result = std::process::Command::new("git").args(args)
+                .current_dir(&root).output().unwrap();
+            assert!(result.status.success(), "{args:?}: {}", String::from_utf8_lossy(&result.stderr));
+            String::from_utf8(result.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(root.join("data.txt"), b"value=1\n").unwrap();
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "baseline"]);
+        let parent = git(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("data.txt"), b"value=2\n").unwrap();
+
+        let root_str = root.to_string_lossy().to_string();
+        let inspection_value = serde_json::json!({
+            "worktree": {
+                "marker": {
+                    "schemaVersion": 1, "worktreeId": "wt-test", "leaseNonce": "lease-1",
+                    "repositoryId": "repo-test", "repositorySlug": "owner/repo",
+                    "repositoryRoot": root_str, "commonGitDir": root.join(".git").to_string_lossy().to_string(),
+                    "canonicalPath": root.to_string_lossy().to_string(),
+                    "branch": "issue-to-pr/fixture", "baseOid": parent.clone(),
+                    "policy": {
+                        "allowedRemotes": ["origin"], "branchPrefix": "issue-to-pr/",
+                        "protectedBranches": ["main", "master", "develop"],
+                        "allowPush": true, "allowCreatePullRequest": true,
+                        "allowReviewComment": false, "allowForkWrites": false
+                    }, "createdAtMs": 1
+                },
+                "state": "active", "locked": false, "lockReason": null,
+                "archivePath": null, "createdAtMs": 1, "updatedAtMs": 1
+            },
+            "headOid": parent.clone(), "ahead": 0, "behind": 0, "dirty": true,
+            "cleanupBlocked": false,
+            "files": [{
+                "path": "data.txt", "oldPath": null, "indexStatus": " ",
+                "worktreeStatus": "M", "untracked": false, "ignored": false
+            }],
+            "diffs": {
+                "staged": {"text": "", "truncated": false},
+                "unstaged": {"text": "modified data.txt", "truncated": false},
+                "head": {"text": "modified data.txt", "truncated": false}
+            }
+        });
+        let mut inspection: m5_delivery::WorktreeInspection =
+            serde_json::from_value(inspection_value).unwrap();
+        let mut run = fixture_run("owner/repo", 42, 1, "opening_pr");
+        run.review_evidence = Some(ReviewEvidence {
+            revision: inspection_digest(&inspection).unwrap(),
+            files_reviewed: vec!["data.txt".to_string()],
+            summary: "Reviewed modified data.txt".to_string(),
+            observed_at_ms: 1,
+            reviewed_head_oid: parent,
+            reviewed_contents_digest: reviewed_contents_digest(
+                &root, &["data.txt".to_string()],
+            ).unwrap(),
+        });
+        assert!(reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "reviewed uncommitted contents must be valid");
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "approved issue repair"]);
+        inspection.head_oid = git(&["rev-parse", "HEAD"]);
+        inspection.dirty = false;
+        inspection.files.clear();
+        inspection.diffs.staged.text.clear();
+        inspection.diffs.unstaged.text.clear();
+        inspection.diffs.head.text.clear();
+        assert!(reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "exact reviewed contents survive a single approved commit and app restart");
+
+        std::fs::write(root.join("data.txt"), b"value=3\n").unwrap();
+        assert!(!reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "uncommitted tampering after the approved commit must fail");
+        git(&["checkout", "--", "data.txt"]);
+        std::fs::write(root.join("unrelated.txt"), b"new\n").unwrap();
+        git(&["add", "--", "unrelated.txt"]);
+        git(&["commit", "-qm", "unreviewed extra commit"]);
+        inspection.head_oid = git(&["rev-parse", "HEAD"]);
+        assert!(!reviewed_delivery_state_matches(&run, &inspection).unwrap(),
+            "any additional unreviewed commit invalidates delivery");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Real Git operations and a real subprocess verification command, with
+    /// deterministic simulated GitHub check responses. No provider or token
+    /// is required for this fixture.
+    #[test]
+    fn real_git_and_simulated_github_failing_ci_repairs_to_final_approval_boundary() {
+        use std::process::Command;
+        let root = temp_path("real-repo-simulated-github");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&root).output().unwrap();
+            assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(root.join("data.txt"), "value=1\n").unwrap();
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "baseline"]);
+        git(&["checkout", "-qb", "issue-to-pr/fixture"]);
+        let initial_oid = git(&["rev-parse", "HEAD"]);
+        let local_check = || Command::new("git")
+            .args(["grep", "-q", "^value=2$", "--", "data.txt"])
+            .current_dir(&root)
+            .status().unwrap().success();
+        assert!(!local_check(), "fixture must start with a real failing repository check");
+        let ci_failed = serde_json::json!({"headRefOid":initial_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"COMPLETED","conclusion":"FAILURE"}]});
+        assert_eq!(classify_ci_rollup(&ci_failed).unwrap().0, "failed");
+        assert!(valid_transition("monitoring_ci", "repairing"));
+
+        // A bounded repair changes only the fixture's declared scope.
+        let attempts = 1u32;
+        assert!(attempts <= MAX_REPAIR_ATTEMPTS);
+        std::fs::write(root.join("data.txt"), "value=2\n").unwrap();
+        assert!(local_check(), "repair must pass a genuine subprocess check");
+        git(&["diff", "--check"]);
+        let changes = git(&["diff", "--name-only"]);
+        assert_eq!(changes, "data.txt", "unrelated changes must be rejected");
+        git(&["add", "--", "data.txt"]);
+        git(&["commit", "-qm", "bounded repair"]);
+        let repaired_oid = git(&["rev-parse", "HEAD"]);
+        assert_ne!(initial_oid, repaired_oid);
+        assert!(valid_transition("repairing", "checking"));
+        assert!(valid_transition("checking", "opening_pr"));
+        let stale = serde_json::json!({"headRefOid":initial_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"COMPLETED","conclusion":"SUCCESS"}]});
+        assert_ne!(stale["headRefOid"].as_str(), Some(repaired_oid.as_str()),
+            "even green checks for the previous commit must not authorize ready");
+        let pending = serde_json::json!({"headRefOid":repaired_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"IN_PROGRESS","conclusion":null}]});
+        assert_eq!(classify_ci_rollup(&pending).unwrap().0, "pending");
+        let green = serde_json::json!({"headRefOid":repaired_oid,
+            "statusCheckRollup":[{"name":"fixture-check","status":"COMPLETED","conclusion":"SUCCESS"}]});
+        assert_eq!(classify_ci_rollup(&green).unwrap().0, "passed");
+        assert!(local_check());
+        assert!(valid_transition("monitoring_ci", "ready"));
+        // It ends at "ready", NOT "done": human publication approval remains.
+        assert!(!valid_transition("ready", "opening_pr"));
+        assert!(valid_transition("ready", "done"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -864,19 +2594,40 @@ mod tests {
         runs.insert(run.run_id.clone(), run.clone());
         save_runs_to(&path, &runs).unwrap();
 
-        let loaded = load_runs_from(&path);
+        let loaded = load_runs_from(&path).unwrap();
         assert_eq!(loaded.get(&run.run_id), Some(&run));
 
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn load_missing_or_corrupt_file_degrades_to_an_empty_map_instead_of_erroring() {
+    fn concurrent_issue_run_updates_keep_all_records_under_transaction_lock() {
+        let path = temp_path("concurrent-run-checkpoints.json");
+        let mut workers = Vec::new();
+        for number in 1..=16_u32 {
+            let path = path.clone();
+            workers.push(std::thread::spawn(move || {
+                let _guard = lock_runs().unwrap();
+                let mut map = load_runs_from(&path).unwrap();
+                let run = fixture_run("owner/repo", number, number as u64, "planning");
+                map.insert(run.run_id.clone(), run);
+                save_runs_to(&path, &map).unwrap();
+            }));
+        }
+        for worker in workers { worker.join().unwrap(); }
+        let recovered = load_runs_from(&path).unwrap();
+        assert_eq!(recovered.len(), 16, "CI polls and token events cannot erase concurrent records");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_store_is_empty_but_corrupt_store_fails_closed_and_preserves_bytes() {
         let path = temp_path("missing.json");
-        assert!(load_runs_from(&path).is_empty());
+        assert!(load_runs_from(&path).unwrap().is_empty());
 
         std::fs::write(&path, "not json").unwrap();
-        assert!(load_runs_from(&path).is_empty());
+        assert!(load_runs_from(&path).unwrap_err().contains("corrupt"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
         let _ = std::fs::remove_file(&path);
     }
 

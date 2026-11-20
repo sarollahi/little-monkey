@@ -5,9 +5,18 @@ import type { IssueToPrRun } from "../lib/issueToPr";
 import { isTerminalIssueToPrStatus } from "../lib/issueToPr";
 import * as issueToPrRunner from "../lib/issueToPrRunner";
 import { errorMessage } from "../lib/errors";
+import { githubReviewThreads, githubFailureLogs, inspectOwnedWorktree } from "../lib/gitDelivery";
 
 function errorText(error: unknown): string {
   return errorMessage(error);
+}
+
+function freshAgentInvocationId(): string {
+  // Browser/desktop uses a cryptographically random UUID. The fallback keeps
+  // older webview/test environments running without reusing a usage ledger ID.
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 /** In-flight cancellation handles, keyed by run id — deliberately NOT part of
@@ -15,17 +24,20 @@ function errorText(error: unknown): string {
  * to react to, and storing it in state would make the store non-serializable
  * for no benefit). */
 const controllers = new Map<string, AbortController>();
+const monitorTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const CI_POLL_MS = 30_000;
 let unlisten: (() => void) | null = null;
+let initialization: Promise<void> | null = null;
 const runIssueToPrAgent = issueToPrRunner.runIssueToPrAgent;
-const autonomousIssueRunner = "runIssueToPrAutonomousTask" in issueToPrRunner
-  ? issueToPrRunner.runIssueToPrAutonomousTask
-  : null;
+const autonomousIssueRunner = () => issueToPrRunner.runIssueToPrAutonomousTask ?? null;
 
 /** Test-only: clears in-flight run controllers. This module's `controllers`
  * map is process-lifetime by design (see the comment above it), which means
  * it otherwise leaks across every test in the same file. */
 export function __resetIssueToPrControllersForTests(): void {
   controllers.clear();
+  for (const timer of monitorTimers.values()) clearTimeout(timer);
+  monitorTimers.clear();
 }
 
 interface IssueToPrState {
@@ -39,7 +51,7 @@ interface IssueToPrState {
   init: () => Promise<void>;
   refresh: () => Promise<void>;
   selectRun: (runId: string | null) => void;
-  start: (issueUrl: string) => Promise<IssueToPrRun>;
+  start: (issueUrl: string, maxRepairAttempts?: number, agentWallTimeMs?: number, totalTokenBudget?: number) => Promise<IssueToPrRun>;
   cancel: (runId: string) => Promise<void>;
   markPrOpened: (runId: string, prNumber: number, prUrl: string) => Promise<void>;
   markDone: (runId: string) => Promise<void>;
@@ -67,8 +79,112 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
     }
   };
 
+  function scheduleCiPoll(runId: string, delay = CI_POLL_MS): void {
+    if (monitorTimers.has(runId)) return;
+    const timer = setTimeout(() => {
+      monitorTimers.delete(runId);
+      void (async () => {
+        try {
+          const latest = await api.getIssueToPrStatus(runId);
+          const known = get().runs.find((run) => run.runId === runId);
+          // The resident OS daemon writes the SAME persisted record without
+          // an in-process Tauri event. Detect its transitions even while the
+          // desktop happens to be open; a daemon-observed failure must start
+          // the existing bounded repair rather than leaving a stale UI.
+          if (!known || known.updatedAtMs !== latest.updatedAtMs || known.status !== latest.status) {
+            onProgress(latest);
+          }
+          if (latest.status !== "monitoring_ci" && latest.status !== "ready") return;
+          onProgress(await api.pollIssueToPrCi(runId));
+        } catch (error) {
+          // A transient GitHub error must not produce a false success.
+          set((state) => ({ activityByRun: { ...state.activityByRun, [runId]: "CI observation unavailable: " + errorText(error) } }));
+          scheduleCiPoll(runId, Math.min(delay * 2, 120_000));
+        }
+      })();
+    }, delay);
+    monitorTimers.set(runId, timer);
+  }
+
+  async function driveRepair(run: IssueToPrRun): Promise<void> {
+    if (controllers.has(run.runId)) return;
+    const controller = new AbortController();
+    controllers.set(run.runId, controller);
+    try {
+      let current = await api.getIssueToPrStatus(run.runId);
+      while (current.status === "repairing" && !controller.signal.aborted) {
+        current = await api.beginIssueToPrRepair(run.runId);
+        onProgress(current);
+        const failingLocalChecks = current.checks.filter((check) => !check.passed)
+          .map((check) => ({ label: check.label, command: check.command, code: check.code, output: check.outputExcerpt }));
+        const lastCi = current.ciHistory[current.ciHistory.length - 1];
+        const reviewThreads = current.prNumber
+          ? await githubReviewThreads(current.worktreeId, current.prNumber).catch(() => null)
+          : null;
+        const logs = current.prNumber
+          ? await githubFailureLogs(current.worktreeId, current.prNumber).catch(() => null)
+          : null;
+        const repairEvidence = JSON.stringify({
+          failingLocalChecks,
+          ciHead: lastCi?.headOid ?? null,
+          ciVerdict: lastCi?.verdict ?? null,
+          ciChecks: lastCi?.checks.filter((check: { conclusion: string }) => !["SUCCESS", "SKIPPED", "NEUTRAL"].includes(check.conclusion)) ?? [],
+          failedActionsLogs: logs?.headRefOid === lastCi?.headOid ? logs?.logs : null,
+          reviewThreads,
+        }).slice(0, 12_000);
+        const result = await (autonomousIssueRunner() ?? runIssueToPrAgent)({
+          runId: current.runId,
+          // New provider calls after a crash must not reuse old token event IDs.
+          agentRunId: current.runId + "-repair-" + current.repairAttempts + "-" + freshAgentInvocationId(),
+          repositorySlug: current.repositorySlug,
+          issueNumber: current.issueNumber,
+          issueTitle: current.issueTitle,
+          issueBody: current.issueBody,
+          issueComments: current.issueComments,
+          branch: current.branch,
+          baseRef: current.baseRef,
+          worktreeId: current.worktreeId,
+          workspaceLabel: current.workspaceLabel,
+          signal: controller.signal,
+          repairEvidence,
+          onToolActivity: (activity) =>
+            set((state) => ({ activityByRun: { ...state.activityByRun, [current.runId]: activity } })),
+        });
+        if (controller.signal.aborted) return;
+        current = await api.getIssueToPrStatus(current.runId);
+        if (current.status === "opening_pr") return;
+        if (current.status === "checking" && result.outcome === "error") {
+          current = await api.advanceIssueToPr(run.runId, current.repairAttempts < current.maxRepairAttempts ? "repairing" : "failed", { error: result.summary });
+        }
+        if (current.status === "repairing" && result.outcome === "completed") {
+          // Fallback for older model runtimes with no coordinator verification node.
+          current = await api.runIssueToPrChecks(current.runId);
+        }
+        if (current.status !== "repairing") return;
+        if (current.repairInProgress) {
+          await api.advanceIssueToPr(run.runId, "failed", { error: "Repair did not reach authoritative verification." });
+          return;
+        }
+      }
+    } catch (error) {
+      const latest = await api.getIssueToPrStatus(run.runId).catch(() => null);
+      if (latest?.status === "repairing") {
+        await api.advanceIssueToPr(run.runId, "failed", { error: "Repair stopped: " + errorText(error) }).catch(() => {});
+      }
+    } finally {
+      controllers.delete(run.runId);
+    }
+  }
+
   const onProgress = (run: IssueToPrRun) => {
     set((state) => ({ runs: upsertRun(state.runs, run) }));
+    if (run.status === "monitoring_ci" || run.status === "ready") scheduleCiPoll(run.runId);
+    if (run.status === "repairing" && !controllers.has(run.runId)) void driveRepair(run);
+    if (isTerminalIssueToPrStatus(run.status)) {
+      const timer = monitorTimers.get(run.runId);
+      if (timer) clearTimeout(timer);
+      monitorTimers.delete(run.runId);
+    }
     if (isTerminalIssueToPrStatus(run.status)) {
       controllers.delete(run.runId);
       set((state) => {
@@ -88,16 +204,19 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
    * every failure path reports itself onto the run record via
    * `advanceIssueToPr` instead. */
   const driveRun = async (run: IssueToPrRun): Promise<void> => {
+    if (controllers.has(run.runId)) return; // A second Start click cannot duplicate the live agent.
     const controller = new AbortController();
     controllers.set(run.runId, controller);
     try {
       await api.advanceIssueToPr(run.runId, "implementing");
-      const result = await (autonomousIssueRunner ?? runIssueToPrAgent)({
+      const result = await (autonomousIssueRunner() ?? runIssueToPrAgent)({
         runId: run.runId,
+        agentRunId: run.runId + "-implementation-" + freshAgentInvocationId(),
         repositorySlug: run.repositorySlug,
         issueNumber: run.issueNumber,
         issueTitle: run.issueTitle,
         issueBody: run.issueBody,
+        issueComments: run.issueComments,
         branch: run.branch,
         baseRef: run.baseRef || "HEAD",
         worktreeId: run.worktreeId,
@@ -114,31 +233,32 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
         return;
       }
       const coordinatorOutcome = "task" in result ? (result as { task?: { outcome?: string } }).task?.outcome : undefined;
+      if (result.durableRunId) await api.advanceIssueToPr(run.runId, "implementing", { durableRunId: result.durableRunId }).catch(() => {});
+      const latest = await api.getIssueToPrStatus(run.runId);
+      if (latest.status === "repairing") {
+        void driveRepair(latest);
+        return;
+      }
+      if (latest.status === "opening_pr" || latest.status === "failed" || latest.status === "cancelled") return;
       if (coordinatorOutcome === "WAITING_USER" || coordinatorOutcome === "WAITING_APPROVAL") {
-        await api.advanceIssueToPr(run.runId, "opening_pr");
+        await api.advanceIssueToPr(run.runId, "failed", { error: "Missing authoritative local check and independent review evidence." });
         return;
       }
       if (result.outcome === "error") {
-        await api.advanceIssueToPr(run.runId, "failed", {
+        await api.advanceIssueToPr(run.runId, latest.status === "checking" && latest.repairAttempts < latest.maxRepairAttempts ? "repairing" : "failed", {
           error: result.summary,
           durableRunId: result.durableRunId,
         });
         return;
       }
-      if (result.durableRunId) {
-        // Self-report onto "implementing" (the status this run was moved to
-        // a few lines up) rather than the closed-over `run.status`, which is
-        // still this run's value from before `start()` kicked off the drive
-        // and would make the Rust state machine reject the whole call.
-        await api
-          .advanceIssueToPr(run.runId, "implementing", { durableRunId: result.durableRunId })
-          .catch(() => {});
-      }
-      await api.runIssueToPrChecks(run.runId);
+      const checked = await api.runIssueToPrChecks(run.runId);
+      if (checked.status === "repairing") void driveRepair(checked);
     } catch (error) {
       await api.advanceIssueToPr(run.runId, "failed", { error: errorText(error) }).catch(() => {});
     } finally {
       controllers.delete(run.runId);
+      const latest = await api.getIssueToPrStatus(run.runId).catch(() => null);
+      if (latest?.status === "repairing") void driveRepair(latest);
     }
   };
 
@@ -151,11 +271,26 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
    * call racing this one can never double-drive the same run. */
   const resumeOrphanedRun = (run: IssueToPrRun): void => {
     if (controllers.has(run.runId) || isTerminalIssueToPrStatus(run.status)) return;
-    if (run.status === "opening_pr" || run.status === "awaiting_review") {
-      // Waiting on a human action (push+open-PR, or mark-done) in the panel
-      // — nothing to re-drive.
+    if (run.status === "monitoring_ci" || run.status === "ready") {
+      scheduleCiPoll(run.runId, 1_000);
       return;
     }
+    if (run.status === "repairing") {
+      void driveRepair(run);
+      return;
+    }
+    if (run.status === "opening_pr") {
+      // If the GitHub write completed but the desktop crashed before the
+      // run record was updated, adopt ONLY the exact owned draft PR. This
+      // reads GitHub and does not trigger a second create/push operation.
+      void api.reconcileIssueToPrPr(run.runId).then(onProgress).catch((error) => {
+        set((state) => ({ activityByRun: {
+          ...state.activityByRun, [run.runId]: "Draft PR reconciliation unavailable: " + errorText(error),
+        } }));
+      });
+      return;
+    }
+    if (run.status === "awaiting_review") return;
     if (run.status === "checking") {
       const controller = new AbortController();
       controllers.set(run.runId, controller);
@@ -165,20 +300,85 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
           // mutation — the list snapshot this loop iterated over can be
           // stale by the time this async resume actually runs.
           const latest = await api.getIssueToPrStatus(run.runId).catch(() => run);
-          if (latest.status === "checking") await api.runIssueToPrChecks(run.runId);
+          if (latest.status === "checking") {
+            const coordinator = autonomousIssueRunner();
+            if (!coordinator) {
+              throw new Error("Independent review coordinator unavailable; refusing unreviewed delivery.");
+            }
+            // Resume the existing tested diff, not the mutating coding turn.
+            const result = await coordinator({
+              runId: latest.runId,
+              agentRunId: latest.runId + "-review-recovery-" + freshAgentInvocationId(),
+              repositorySlug: latest.repositorySlug,
+              issueNumber: latest.issueNumber,
+              issueTitle: latest.issueTitle,
+              issueBody: latest.issueBody,
+              issueComments: latest.issueComments,
+              branch: latest.branch,
+              baseRef: latest.baseRef,
+              worktreeId: latest.worktreeId,
+              workspaceLabel: latest.workspaceLabel,
+              resumeReviewOnly: true,
+              signal: controller.signal,
+              onToolActivity: (label) =>
+                set((state) => ({ activityByRun: { ...state.activityByRun, [latest.runId]: label } })),
+            });
+            const after = await api.getIssueToPrStatus(latest.runId);
+            if (after.status === "checking" && result.outcome !== "completed") {
+              await api.advanceIssueToPr(latest.runId,
+                after.repairAttempts < after.maxRepairAttempts ? "repairing" : "failed",
+                { error: result.summary });
+            }
+          }
         } catch (error) {
           await api.advanceIssueToPr(run.runId, "failed", { error: errorText(error) }).catch(() => {});
         } finally {
           controllers.delete(run.runId);
+          const after = await api.getIssueToPrStatus(run.runId).catch(() => null);
+          if (after?.status === "repairing") void driveRepair(after);
         }
       })();
       return;
     }
-    // "planning" or "implementing": re-run the headless agent turn against
-    // the same owned worktree. Any files it already wrote are still on disk,
-    // so the agent picks up from there instead of losing progress; the self-
-    // transition `implementing` -> `implementing` this triggers is a legal
-    // no-op on the Rust side (see `issue_to_pr.rs`'s `valid_transition`).
+    if (run.status === "implementing") {
+      // A crash may have happened AFTER mutations but BEFORE the model
+      // returned. Replaying that uncommitted coding turn risks duplicated or
+      // contradictory edits. Fence this recovery while inspecting the
+      // authoritative owned worktree, then reverify the actual diff instead.
+      const controller = new AbortController();
+      controllers.set(run.runId, controller);
+      void (async () => {
+        let next: IssueToPrRun | null = null;
+        try {
+          const latest = await api.getIssueToPrStatus(run.runId);
+          if (latest.status !== "implementing" || controller.signal.aborted) return;
+          const inspection = await inspectOwnedWorktree(latest.worktreeId);
+          if (controller.signal.aborted) return;
+          if (inspection.worktree.marker.branch !== latest.branch
+              || inspection.worktree.marker.repositorySlug !== latest.repositorySlug) {
+            throw new Error("Owned worktree identity changed during restart recovery.");
+          }
+          if (inspection.files.some((file) => !file.ignored)) {
+            next = await api.advanceIssueToPr(latest.runId, "checking");
+            onProgress(next);
+          } else {
+            next = latest; // No observed mutation; an agent restart is safe.
+          }
+        } catch (error) {
+          await api.advanceIssueToPr(run.runId, "failed", {
+            error: "Could not safely recover interrupted issue implementation: " + errorText(error),
+          }).catch(() => {});
+        } finally {
+          controllers.delete(run.runId);
+          if (!controller.signal.aborted && next) {
+            if (next.status === "checking") resumeOrphanedRun(next);
+            else if (next.status === "implementing") void driveRun(next);
+          }
+        }
+      })();
+      return;
+    }
+    // Planning has not initiated a model mutation; start the existing driver.
     void driveRun(run);
   };
 
@@ -192,14 +392,16 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
     clearMessages: () => set({ error: null, notice: null }),
 
-    init: async () => {
-      if (!unlisten) {
-        unlisten = await api.listenIssueToPrProgress(onProgress);
-      }
-      await get().refresh();
-      for (const run of get().runs) {
-        resumeOrphanedRun(run);
-      }
+    init: () => {
+      // Main window starts recovery at boot; the panel may mount during the
+      // same async listener registration. Share one initialization promise.
+      if (initialization) return initialization;
+      initialization = (async () => {
+        if (!unlisten) unlisten = await api.listenIssueToPrProgress(onProgress);
+        await get().refresh();
+        for (const run of get().runs) resumeOrphanedRun(run);
+      })().finally(() => { initialization = null; });
+      return initialization;
     },
 
     refresh: () =>
@@ -215,9 +417,18 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
     selectRun: (runId) => set({ selectedRunId: runId }),
 
-    start: (issueUrl) =>
+    start: (issueUrl, maxRepairAttempts = 2, agentWallTimeMs = 30 * 60_000, totalTokenBudget = 250_000) =>
       perform("start", async () => {
-        const run = await api.startIssueToPr(issueUrl);
+        const initial = await api.startIssueToPr(issueUrl);
+        // Native issue intake returns the same nonterminal run for repeated
+        // starts. Do not reset its frozen budget or schedule another agent.
+        if (initial.status !== "planning") {
+          set((state) => ({ runs: upsertRun(state.runs, initial), selectedRunId: initial.runId }));
+          resumeOrphanedRun(initial);
+          return initial;
+        }
+        await api.setIssueToPrRepairLimit(initial.runId, maxRepairAttempts);
+        const run = await api.setIssueToPrExecutionBudget(initial.runId, agentWallTimeMs, totalTokenBudget);
         set((state) => ({ runs: upsertRun(state.runs, run), selectedRunId: run.runId }));
         void driveRun(run);
         return run;
@@ -232,8 +443,9 @@ export const useIssueToPrStore = create<IssueToPrState>((set, get) => {
 
     markPrOpened: (runId, prNumber, prUrl) =>
       perform(`pr:${runId}`, async () => {
-        const run = await api.advanceIssueToPr(runId, "awaiting_review", { prNumber, prUrl });
+        const run = await api.advanceIssueToPr(runId, "monitoring_ci", { prNumber, prUrl });
         set((state) => ({ runs: upsertRun(state.runs, run) }));
+        scheduleCiPoll(run.runId, 1_000);
       }),
 
     markDone: (runId) =>

@@ -100,18 +100,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for cache in src-tauri/target/${{ matrix.target }}/debug/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
-            echo "$cache"
-            grep -E '^(GGML_NATIVE|GGML_CPU_ARM_ARCH|GGML_AVX512|HAVE_[A-Z0-9_]+):' "$cache"
-            grep -q '^GGML_NATIVE:BOOL=OFF' "$cache"
+          # Portable Bash 3.2 on macOS does not support mapfile.
+          # whisper-rs-sys now builds at build/whisper-rs-sys/<hash>/out/build;
+          # reject a missing cache rather than silently passing the baseline.
+          found=0
+          while IFS= read -r -d '' cache; do
+            found=1
+            echo "Checking portable CPU flags in $cache"
+            grep -E '^(GGML_NATIVE|GGML_CPU_ARM_ARCH|GGML_AVX512|HAVE_[A-Z0-9_]+):' "$cache" || true
+            if ! grep -qE '^GGML_NATIVE:(BOOL|UNINITIALIZED)=OFF$' "$cache"; then
+              echo "::error::Whisper native CPU tuning is not explicitly disabled"
+              exit 1
+            fi
             if grep -qE '^(GGML_AVX512:BOOL=ON|HAVE_(SVE|MATMUL_INT8|SME):INTERNAL=1)' "$cache"; then
               echo "::error::whisper.cpp uses instructions outside the portable baseline"
               exit 1
             fi
             case '${{ matrix.target }}' in
-              aarch64-*) grep -q '^HAVE_DOTPROD:INTERNAL=1' "$cache" ;;
+              aarch64-*)
+                grep -q '^HAVE_DOTPROD:INTERNAL=1' "$cache" || {
+                  echo "::error::ARM baseline DOTPROD is not enabled"
+                  exit 1
+                } ;;
             esac
-          done
+          done < <(find src-tauri/target -type f -name CMakeCache.txt -path '*/whisper-rs-sys/*/out/build/CMakeCache.txt' -print0)
+          if [ "$found" -ne 1 ]; then
+            echo "::error::Whisper built but no verifiable whisper-rs-sys CMakeCache.txt was found"
+            find src-tauri/target -name CMakeCache.txt -o -name '*whisper-rs-sys*' | head -80
+            exit 1
+          fi
 
   real-transcription:
     name: real WAV + browser WebM/Opus transcription

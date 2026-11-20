@@ -222,6 +222,15 @@ jobs:
           pnpm tauri signer generate --ci -p "" -w "$RUNNER_TEMP/updater.key"
           echo "TAURI_SIGNING_PRIVATE_KEY=$RUNNER_TEMP/updater.key" >> "$GITHUB_ENV"
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
+      # The restored target/ can carry whisper.cpp's CMakeCache.txt from an
+      # older runner image. CMake then reuses the cached CMAKE_ASM_COMPILER
+      # path of a toolchain the current image no longer has (seen on
+      # windows-latest when MSVC moved from 14.51 to 14.52) and stops at
+      # configure. Rebuild that one native crate from scratch, the same way
+      # local-whisper.yml does; every other cached crate is kept.
+      - name: Drop restored whisper.cpp native build state
+        shell: bash
+        run: cargo clean --manifest-path src-tauri/Cargo.toml -p whisper-rs-sys --release --target ${{ matrix.target }}
       - name: Build installable package through production staging
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       # One path per line, from whatever tool can read this platform's package.

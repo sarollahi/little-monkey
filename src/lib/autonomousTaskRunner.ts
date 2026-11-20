@@ -764,6 +764,8 @@ export interface StartAutonomousTaskParams {
   planningContext?: CreateAutonomousTaskInput["planningContext"];
   deliveryIntent?: CreateAutonomousTaskInput["deliveryIntent"];
   deliveryTarget?: CreateAutonomousTaskInput["deliveryTarget"];
+  /** Frozen per-task ceiling, cannot broaden permission or external delivery. */
+  budgetSnapshot?: CreateAutonomousTaskInput["budgetSnapshot"];
   onUpdate?: (task: AutonomousTask) => void;
   runtime?: AutonomousTaskRuntime;
   signal?: AbortSignal;
@@ -850,14 +852,14 @@ export async function startAutonomousTask(params: StartAutonomousTaskParams): Pr
   if (!primary) throw new Error("Open a workspace before starting an autonomous task.");
   const permission = usePermissionStore.getState();
   const runBudgets = defaultRunBudgets(false);
-  const task = createAutonomousTask({ objective: params.objective, sessionId: params.sessionId, targetSnapshot, workspaceRoots: structuredClone(roots), permissionSnapshot: { mode: permission.mode, unattended: true, allowNetwork: false, allowExternalMutations: false }, constraints: params.constraints, planningContext: params.planningContext, deliveryIntent: params.deliveryIntent, deliveryTarget: params.deliveryTarget, budgetSnapshot: { wallTimeMs: runBudgets.wall_time_ms, maxModelCalls: runBudgets.max_model_calls, maxToolCalls: runBudgets.max_tool_calls, maxRepairRounds: 2, maxWorkers: 16, maxConcurrentWorkers: 4, maxArtifactBytes: runBudgets.max_artifact_bytes, maxCostMicros: runBudgets.max_cost_micros } });
+  const task = createAutonomousTask({ objective: params.objective, sessionId: params.sessionId, targetSnapshot, workspaceRoots: structuredClone(roots), permissionSnapshot: { mode: permission.mode, unattended: true, allowNetwork: false, allowExternalMutations: false }, constraints: params.constraints, planningContext: params.planningContext, deliveryIntent: params.deliveryIntent, deliveryTarget: params.deliveryTarget, budgetSnapshot: { wallTimeMs: runBudgets.wall_time_ms, maxModelCalls: runBudgets.max_model_calls, maxToolCalls: runBudgets.max_tool_calls, maxRepairRounds: 2, maxWorkers: 16, maxConcurrentWorkers: 4, maxArtifactBytes: runBudgets.max_artifact_bytes, maxCostMicros: runBudgets.max_cost_micros, ...params.budgetSnapshot } });
   const ownerFence = async (owner = task.executionOwner): Promise<void> => {
     await invoke("autonomous_task_owner_fence", { request: { taskId: task.taskId, owner: { kind: owner.kind, instance_id: owner.instanceId, lease_epoch: owner.leaseEpoch, lease_expires_at_ms: owner.leaseExpiresAtMs } } });
   };
   await ownerFence();
   const control = new AutonomousTaskControl();
   const signal = mergeSignals(control.signal, params.signal);
-  const recorder = await beginDurableRun({ runId: task.taskId, kind: "autonomous_task", task: task.objective, instructions: "Universal autonomous task coordinator", target: targetSnapshot, roots, permissionMode: permission.mode, allowNetwork: false, allowExternalMutations: false, budgets: runBudgets, workspaceAccess: "read_write" });
+  const recorder = await beginDurableRun({ runId: task.taskId, kind: "autonomous_task", task: task.objective, instructions: "Universal autonomous task coordinator", target: targetSnapshot, roots, permissionMode: permission.mode, allowNetwork: false, allowExternalMutations: false, budgets: { ...runBudgets, wall_time_ms: task.budgetSnapshot.wallTimeMs, max_model_calls: task.budgetSnapshot.maxModelCalls, max_tool_calls: task.budgetSnapshot.maxToolCalls }, workspaceAccess: "read_write" });
   const eventSink: AutonomousTaskEventSink = async (event) => { if (recorder) await appendRunEvent(task.taskId, taskEventToRunEvent(event)); };
   const completion = runAutonomousTask({ task, resolvedTarget, runtime: params.runtime ?? defaultAutonomousTaskRuntime(resolvedTarget, defaultAutonomousTaskPlacementAdapters()), signal, eventSink, onUpdate: params.onUpdate, control, ownerFence }).then(async (result) => {
     await finishAutonomousRun(recorder, result); return result;

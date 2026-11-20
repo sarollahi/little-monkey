@@ -369,6 +369,15 @@ const CLASSIFIED: &[(&str, Class, &str)] = &[
         "`gh` review operations against a delivery this app created",
     ),
     (
+        "issue_to_pr.rs",
+        Class::HostUtility,
+        "read-only `git ls-files`/`rev-parse`/`diff --name-only` against the app-owned \
+         Issue-to-PR worktree, to fingerprint review and verification evidence. Argument \
+         vectors are fixed here; the only variable values are the owned worktree path and \
+         a commit id this app recorded, never issue text or model output. Its tests also \
+         spawn `git` to build fixture repositories",
+    ),
+    (
         "imessage_helper/messages.rs",
         Class::HostUtility,
         "`osascript` with argv-passed values, never string interpolation — the recipient \

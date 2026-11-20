@@ -568,12 +568,14 @@ pub struct McpConnection {
 /// transport is built out of two bare `tokio::spawn`s:
 ///
 /// - `StreamableHttpClientTransport::with_client` is `WorkerTransport::spawn`,
-///   a `tokio::spawn` at rmcp-2.2.0's `transport/worker.rs:115`. Every HTTP
+///   a `tokio::spawn` at rmcp-3.11.0's `transport/worker.rs:229`. Every HTTP
 ///   request the transport ever issues runs in that task.
 /// - `rmcp::serve_client` ends in `serve_inner`, which spawns the service loop
-///   with `tokio::spawn` at rmcp-2.2.0's `service.rs:945`.
+///   through `spawn_service_task`, a bare `tokio::spawn` at rmcp-3.11.0's
+///   `service.rs:1392` (the crate's `local` feature, which would swap it for
+///   `spawn_local`, is not enabled here).
 ///
-/// And `Transport::send` for a `WorkerTransport` (`transport/worker.rs:189`) only
+/// And `Transport::send` for a `WorkerTransport` (`transport/worker.rs:346`) only
 /// pushes onto an mpsc channel, so even the `initialize` POST that
 /// `serve_client` *awaits in this task* is issued by the worker task, not here.
 /// So the scope covers the OAuth token fetch below (a real, credentialed

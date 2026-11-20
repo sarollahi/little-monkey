@@ -108,10 +108,64 @@ pub(super) fn cli_beside_test_binary(_current: &Path) -> Option<PathBuf> {
 /// `deps/` plus that path, newest first, and each is asked what it is: a test
 /// harness answers `--list` with its test names, and the CLI refuses the flag.
 /// One exec per candidate, once per test run.
+fn cargo_profile_of_test_binary(current: &Path) -> Option<PathBuf> {
+    // The test launcher may be a copied Tauri sidecar in build/*/out,
+    // a libtest under deps/, or an external runner mounting the binary
+    // without the sibling deps directory. Profile naming is stable even
+    // when that directory is absent.
+    current.ancestors()
+        .find(|dir| dir.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "debug" || name == "release"))
+        .map(Path::to_path_buf)
+}
+
+#[test]
+fn finds_cli_profile_from_both_regular_deps_and_tauri_sidecar_out_dir() {
+    let root = std::env::temp_dir().join(format!(
+        "lm-cli-profile-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let profile = root.join("target").join("debug");
+    // No deps directory on purpose: a copied Tauri harness can run without
+    // its build root attached and must still identify the Cargo profile.
+    std::fs::create_dir_all(&profile).expect("create profile");
+    std::fs::create_dir_all(profile.join("build").join("little-monkey").join("hash").join("out"))
+        .expect("create Tauri build out");
+    let normal = profile.join("deps").join("monkey_cli-hash");
+    let tauri_copy = profile.join("build").join("little-monkey").join("hash").join("out").join("monkey-cli");
+    assert_eq!(cargo_profile_of_test_binary(&normal), Some(profile.clone()));
+    assert_eq!(cargo_profile_of_test_binary(&tauri_copy), Some(profile.clone()));
+    std::fs::remove_dir_all(root).expect("cleanup fixture");
+}
+
 fn locate_cli_binary() -> PathBuf {
     let current = std::env::current_exe().expect("test binary path");
-    let deps = current.parent().expect("deps directory").to_path_buf();
-    let profile = deps.parent().expect("profile directory").to_path_buf();
+    // tauri-build copies externalBin into target/<profile>/build/<crate>/<hash>/out
+    // as part of ordinary cargo test compilation. A test process may be
+    // running from that copied harness, not target/<profile>/deps. Ascend to
+    // the real Cargo profile directory rather than assuming the immediate
+    // parent is deps (which made five daemon E2Es fail on all OSes).
+    // Prefer an explicitly provided real executable (GitHub CI and
+    // installed-service harnesses supply it). Verify the executable's
+    // identity instead of treating a path supplied by the environment as
+    // inherently trusted.
+    if let Some(explicit) = std::env::var_os(CLI_ENV).map(PathBuf::from) {
+        if is_the_cli(&explicit) { return explicit; }
+    }
+    let profile = cargo_profile_of_test_binary(&current)
+        .unwrap_or_else(|| {
+            // Tauri build artifacts sometimes run outside Cargo's profile
+            // hierarchy. The source manifest remains stable at compile time.
+            // Cargo's explicit target directory, when configured, wins.
+            let target = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+            let profile_name = if cfg!(debug_assertions) { "debug" } else { "release" };
+            target.join(profile_name)
+        });
+    let deps = profile.join("deps");
     let name = if cfg!(windows) {
         "monkey-cli.exe"
     } else {
@@ -119,7 +173,9 @@ fn locate_cli_binary() -> PathBuf {
     };
 
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&deps)
-        .expect("read deps")
+        .ok()
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
@@ -154,6 +210,17 @@ fn locate_cli_binary() -> PathBuf {
 /// answers `--list` with its tests, clap rejects the flag outright.
 fn is_the_cli(candidate: &Path) -> bool {
     if !candidate.is_file() {
+        return false;
+    }
+    // Failing an unknown --list flag alone does not identify the CLI: any
+    // unrelated executable (including a crashing harness) can fail that way.
+    // Clap's declared binary name is "monkey" in main.rs.
+    let Ok(version) = std::process::Command::new(candidate).arg("--version").output() else {
+        return false;
+    };
+    if !version.status.success()
+        || !String::from_utf8_lossy(&version.stdout).trim().starts_with("monkey ")
+    {
         return false;
     }
     let Ok(output) = std::process::Command::new(candidate).arg("--list").output() else {

@@ -9,6 +9,9 @@ export type IssueToPrStatus =
   | "checking"
   | "opening_pr"
   | "awaiting_review"
+  | "monitoring_ci"
+  | "repairing"
+  | "ready"
   | "done"
   | "failed"
   | "cancelled";
@@ -21,6 +24,29 @@ export interface IssueToPrCheckOutcome {
   outputExcerpt: string;
 }
 
+export interface IssueToPrCiCheck {
+  name: string;
+  state: string;
+  conclusion: string;
+  url: string | null;
+}
+
+export interface IssueToPrCiObservation {
+  headOid: string;
+  verdict: "pending" | "failed" | "passed";
+  checks: IssueToPrCiCheck[];
+  observedAtMs: number;
+  reviewedHeadOid?: string;
+  reviewedContentsDigest?: string;
+}
+
+export interface IssueToPrReviewEvidence {
+  revision: string;
+  filesReviewed: string[];
+  summary: string;
+  observedAtMs: number;
+}
+
 export interface IssueToPrRun {
   runId: string;
   issueUrl: string;
@@ -28,6 +54,7 @@ export interface IssueToPrRun {
   issueNumber: number;
   issueTitle: string;
   issueBody: string;
+  issueComments: string[];
   worktreeId: string;
   branch: string;
   baseRef: string;
@@ -36,6 +63,18 @@ export interface IssueToPrRun {
   prNumber: number | null;
   prUrl: string | null;
   checks: IssueToPrCheckOutcome[];
+  verificationGeneration: number;
+  verificationInProgress: boolean;
+  reviewEvidence: IssueToPrReviewEvidence | null;
+  ciHistory: IssueToPrCiObservation[];
+  ciHeadOid: string | null;
+  repairAttempts: number;
+  maxRepairAttempts: number;
+  repairInProgress: boolean;
+  agentWallTimeMs: number;
+  totalTokenBudget: number;
+  tokensUsed: number;
+  usageEventIds: string[];
   error: string | null;
   durableRunId: string | null;
   createdAtMs: number;
@@ -86,6 +125,33 @@ export const advanceIssueToPr = (
 
 export const runIssueToPrChecks = (runId: string) =>
   invoke<IssueToPrRun>("issue_to_pr_run_checks", { runId });
+
+export const pollIssueToPrCi = (runId: string) =>
+  invoke<IssueToPrRun>("issue_to_pr_poll_ci", { runId });
+
+export const beginIssueToPrRepair = (runId: string) =>
+  invoke<IssueToPrRun>("issue_to_pr_begin_repair", { runId });
+
+export const setIssueToPrRepairLimit = (runId: string, maxAttempts: number) =>
+  invoke<IssueToPrRun>("issue_to_pr_set_repair_limit", { runId, maxAttempts });
+
+export const reconcileIssueToPrPr = (runId: string) =>
+  invoke<IssueToPrRun>("issue_to_pr_reconcile_pr", { runId });
+
+export const issueToPrDeliveryRevisionValid = (runId: string) =>
+  invoke<boolean>("issue_to_pr_delivery_revision_valid", { runId });
+
+export const issueToPrWorktreeRevision = (runId: string) =>
+  invoke<string>("issue_to_pr_worktree_revision", { runId });
+
+export const recordIssueToPrReview = (runId: string, revision: string, filesReviewed: string[], summary: string) =>
+  invoke<IssueToPrRun>("issue_to_pr_record_review", { runId, revision, filesReviewed, summary });
+
+export const setIssueToPrExecutionBudget = (runId: string, agentWallTimeMs: number, totalTokenBudget: number) =>
+  invoke<IssueToPrRun>("issue_to_pr_set_execution_budget", { runId, agentWallTimeMs, totalTokenBudget });
+
+export const chargeIssueToPrTokens = (runId: string, usageId: string, inputTokens: number, outputTokens: number) =>
+  invoke<IssueToPrRun>("issue_to_pr_charge_tokens", { runId, usageId, inputTokens, outputTokens });
 
 export function listenIssueToPrProgress(
   onProgress: (run: IssueToPrRun) => void,

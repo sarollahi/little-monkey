@@ -43,6 +43,8 @@ function emptyMcpRegistry(): McpToolRegistry {
  * than the model's own tool-call list. */
 export interface HeadlessAgentEvidence {
   executedTools: string[];
+  /** Paths from successful, actually-dispatched read_file tool results. */
+  successfulFileReads?: string[];
   toolFailures: string[];
   permissionRequests: string[];
   promptTokens: number;
@@ -76,6 +78,12 @@ export interface RunHeadlessAgentParams {
    * text-only model to guess at pixels. */
   requireVision?: boolean;
   maxIterations: number;
+  /** Optional wall clock ceiling; aborts in-flight model and tools. */
+  maxWallTimeMs?: number;
+  /** Durable usage accounting before a model can execute tool calls. */
+  onUsage?: (usageId: string, inputTokens: number, outputTokens: number) => Promise<void>;
+  /** Re-read the frozen remaining budget before EACH model request. */
+  beforeModelRequest?: () => Promise<void>;
   /** Defaults to `code`; use `explore` for analysis-only agents so mutating
    * tools are absent from both the model schema and durable workspace policy. */
   toolProfile?: 'explore' | 'code';
@@ -108,7 +116,11 @@ export interface RunHeadlessAgentParams {
   validateFinal?: (summary: string) => void | Promise<void>;
 }
 
-function workspaceRootViolation(toolCall: ToolCall, requiredRoot: string | undefined): string | null {
+function workspaceRootViolation(
+  toolCall: ToolCall,
+  requiredRoot: string | undefined,
+  executionSource?: string,
+): string | null {
   if (!requiredRoot) return null;
   let args: Record<string, unknown>;
   try {
@@ -131,6 +143,22 @@ function workspaceRootViolation(toolCall: ToolCall, requiredRoot: string | undef
   if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}/`)) {
     return `Tool "${toolCall.function.name}" may only target attached root "${requiredRoot}".`;
   }
+  // Both the coding agent and the independent reviewer are root-fenced.
+  // Deny traversals before any tool reaches Rust, including read-only calls.
+  const relative = normalizedPath.slice(normalizedRoot.length).replace(/^\//, '');
+  const components = relative.split('/').filter((part) => part !== '' && part !== '.');
+  if (components.includes('..')) return 'Owned-worktree tools may not traverse parent directories.';
+  if (executionSource === 'issue-to-pr' || executionSource === 'issue-to-pr-review') {
+    const lower = components.map((part) => part.toLowerCase());
+    if (lower.includes('.git')) return 'Issue agents and reviewers cannot access Git internals.';
+    if (executionSource === 'issue-to-pr'
+        && (toolCall.function.name === 'write_file' || toolCall.function.name === 'edit_file')
+        && (lower[0] === '.gitmodules'
+            || lower[0] === '.gitattributes'
+            || (lower[0] === '.github' && (lower[1] === 'workflows' || lower[1] === 'actions')))) {
+      return 'Issue agents cannot modify Git or GitHub execution policy without a human-controlled workflow.';
+    }
+  }
   return null;
 }
 
@@ -141,7 +169,12 @@ function workspaceRootViolation(toolCall: ToolCall, requiredRoot: string | undef
  * path alongside the normal outcome handling.
  */
 export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<HeadlessAgentResult> {
-  const { runId, signal } = params;
+  const { runId } = params;
+  const budgetController = new AbortController();
+  const budgetTimer = params.maxWallTimeMs && params.maxWallTimeMs > 0
+    ? setTimeout(() => budgetController.abort("Agent wall-time budget exhausted"), params.maxWallTimeMs)
+    : null;
+  const signal = budgetTimer ? AbortSignal.any([params.signal, budgetController.signal]) : params.signal;
   let recorder: DurableRunRecorder | null = null;
   const evidence: HeadlessAgentEvidence = {
     executedTools: [],
@@ -202,7 +235,9 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
       : null;
 
     for (let iteration = 0; iteration < params.maxIterations; iteration++) {
-      if (signal.aborted) return finish('cancelled', CANCELLED_SUMMARY);
+      if (signal.aborted) return finish(budgetController.signal.aborted ? 'error' : 'cancelled', budgetController.signal.aborted ? 'Agent wall-time budget exhausted.' : CANCELLED_SUMMARY);
+      await params.beforeModelRequest?.();
+      if (signal.aborted) return finish(budgetController.signal.aborted ? 'error' : 'cancelled', budgetController.signal.aborted ? 'Agent wall-time budget exhausted.' : CANCELLED_SUMMARY);
 
       const wireHistory: ChatMessage[] = [
         { role: 'system', content: params.systemPrompt },
@@ -211,10 +246,19 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
       const attempt = await attemptStream(target, wireHistory, tools, signal, effort, runId);
 
       if (attempt.usage) {
-        recorder?.recordUsage(attempt.usage.promptTokens, attempt.usage.completionTokens);
-        evidence.promptTokens += attempt.usage.promptTokens;
-        evidence.completionTokens += attempt.usage.completionTokens;
+        const inputTokens = attempt.usage.promptTokens;
+        const outputTokens = attempt.usage.completionTokens;
+        if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens) || inputTokens < 0 || outputTokens < 0) {
+          return finish('error', 'Invalid provider token usage; cannot enforce frozen budget.');
+        }
+        if (params.onUsage) await params.onUsage(`${runId}-${iteration}`, inputTokens, outputTokens);
+        recorder?.recordUsage(inputTokens, outputTokens);
+        evidence.promptTokens += inputTokens;
+        evidence.completionTokens += outputTokens;
+      } else if (params.onUsage) {
+        return finish('error', 'Provider supplied no token usage; cannot enforce frozen budget.');
       }
+      if (budgetController.signal.aborted) return finish('error', 'Agent wall-time budget exhausted.');
       if (attempt.streamError !== null) return finish('error', attempt.streamError);
 
       if (attempt.toolCalls.length === 0) {
@@ -234,7 +278,7 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
         const aborted = signal.aborted;
         const offered = isToolCallAllowed(toolCall, tools);
         const rootViolation = offered
-          ? workspaceRootViolation(toolCall, params.requiredWorkspaceRoot)
+          ? workspaceRootViolation(toolCall, params.requiredWorkspaceRoot, params.executionSource)
           : null;
         const allowed = offered && !rootViolation;
         if (!aborted) {
@@ -272,6 +316,16 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
           // "which tools ran" never counts one the offered-tool check refused.
           evidence.executedTools.push(toolCall.function.name);
           const outcome = toolResultOutcome(resultContent, false);
+          if (toolCall.function.name === 'read_file' && outcome === 'succeeded') {
+            try {
+              const args = JSON.parse(toolCall.function.arguments || '{}') as { path?: unknown };
+              if (typeof args.path === 'string') {
+                // Keep only paths, never file contents or tokens in telemetry.
+                const path = args.path.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+                if (path) (evidence.successfulFileReads ??= []).push(path);
+              }
+            } catch { /* An unparseable read is never accepted as coverage. */ }
+          }
           if (outcome === 'denied') evidence.permissionRequests.push(toolCall.function.name);
           if (outcome === 'failed' || outcome === 'denied') {
             evidence.toolFailures.push(`${toolCall.function.name}: ${resultContent.slice(0, 240)}`);
@@ -292,7 +346,7 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
         ];
       }
 
-      if (signal.aborted) return finish('cancelled', CANCELLED_SUMMARY);
+      if (signal.aborted) return finish(budgetController.signal.aborted ? 'error' : 'cancelled', budgetController.signal.aborted ? 'Agent wall-time budget exhausted.' : CANCELLED_SUMMARY);
     }
 
     return finish(
@@ -301,5 +355,7 @@ export async function runHeadlessAgent(params: RunHeadlessAgentParams): Promise<
     );
   } catch (error) {
     return finish('error', errorMessage(error));
+  } finally {
+    if (budgetTimer) clearTimeout(budgetTimer);
   }
 }

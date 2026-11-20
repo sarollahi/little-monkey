@@ -15,10 +15,12 @@ import {
 import {
   executeDeliveryMutation,
   prepareDeliveryMutation,
+  inspectOwnedWorktree,
   type ConfirmationPreview,
   type DeliveryMutation,
 } from "../../lib/gitDelivery";
 import type { IssueToPrRun, IssueToPrStatus } from "../../lib/issueToPr";
+import { issueToPrDeliveryRevisionValid } from "../../lib/issueToPr";
 import { isTerminalIssueToPrStatus } from "../../lib/issueToPr";
 import { isSpecTooVague, SPEC_DIMENSIONS } from "../../lib/specScorer";
 import { useT } from "../../lib/i18n";
@@ -26,6 +28,7 @@ import { useIssueToPrStore } from "../../store/issueToPrStore";
 import { useSpecScorerStore } from "../../store/specScorerStore";
 import { Button, IconButton, StatusPill, type PillTone } from "../ui";
 import { errorMessage } from "../../lib/errors";
+import { IssueToPrTimeline } from "./IssueToPrTimeline";
 import { statusTone as sharedStatusTone } from "../../lib/statusTone";
 
 interface IssueToPrPanelProps {
@@ -53,7 +56,7 @@ function errorText(error: unknown): string {
  * mutation. Nothing here bypasses that: both steps require the user to read
  * the preview and type the exact confirmation phrase before anything is
  * written to GitHub. */
-function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number, prUrl: string) => void) {
+function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number, prUrl: string) => Promise<void>) {
   const [preview, setPreview] = useState<ConfirmationPreview | null>(null);
   // The EXACT mutation object `preview` was computed from — `execute`
   // recomputes the digest from whatever mutation it's given and rejects a
@@ -64,25 +67,44 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [changedFiles, setChangedFiles] = useState<string[]>([]);
 
   const reset = () => {
     setPreview(null);
     setPendingMutation(null);
     setConfirmation("");
     setError(null);
+    setChangedFiles([]);
+  };
+
+  const previewNext = async (mutation: DeliveryMutation) => {
+    const next = await prepareDeliveryMutation(mutation);
+    setPreview(next);
+    setPendingMutation(mutation);
+    setConfirmation("");
   };
 
   const preparePush = async () => {
     if (!run) return;
     setError(null);
     try {
-      const mutation: DeliveryMutation = {
-        kind: "push",
-        payload: { worktreeId: run.worktreeId, remote: "origin" },
-      };
-      const result = await prepareDeliveryMutation(mutation);
-      setPreview(result);
-      setPendingMutation(mutation);
+      if (!run.checks.length || run.checks.some((check) => !check.passed || check.code !== 0)) {
+        throw new Error("Authoritative repository tests must pass before GitHub delivery.");
+      }
+      if (!run.reviewEvidence || !await issueToPrDeliveryRevisionValid(run.runId)) {
+        throw new Error("The owned diff or committed content no longer matches independent review. Reverify before delivery.");
+      }
+      const inspection = await inspectOwnedWorktree(run.worktreeId);
+      if (inspection.worktree.marker.repositorySlug !== run.repositorySlug
+          || inspection.worktree.marker.branch !== run.branch) {
+        throw new Error("Owned branch identity no longer matches the issue.");
+      }
+      const files = [...new Set(inspection.files.filter((file) => !file.ignored).map((file) => file.path))];
+      setChangedFiles(files);
+      if (inspection.dirty && files.length === 0) throw new Error("Dirty owned worktree has no safe changed-file list.");
+      await previewNext(inspection.dirty
+        ? { kind: "commit", payload: { worktreeId: run.worktreeId, paths: files, message: ("Fix issue #" + run.issueNumber + ": " + run.issueTitle).slice(0, 120) } }
+        : { kind: "push", payload: { worktreeId: run.worktreeId, remote: "origin" } });
     } catch (err) {
       setError(errorText(err));
     }
@@ -93,36 +115,57 @@ function usePrConfirmFlow(run: IssueToPrRun | null, onOpened: (prNumber: number,
     setBusy(true);
     setError(null);
     try {
-      if (pendingMutation.kind === "push") {
-        await executeDeliveryMutation(pendingMutation, preview.digest, confirmation);
-        setConfirmation("");
-        const title = `Fixes #${run.issueNumber}: ${run.issueTitle}`.slice(0, 512);
-        const checksSummary = run.checks.length
-          ? run.checks.map((check) => `- ${check.passed ? "✅" : "❌"} ${check.label}: \`${check.command}\``).join("\n")
-          : "No test/build scripts were detected in this repository.";
+      // Confirmations remain tied to the actual reviewed bytes even if a
+      // file changes after the user sees the preview. A previously reviewed
+      // commit can resume after a restart only when the native backend proves
+      // one exact commit with the same file set and contents.
+      if (!await issueToPrDeliveryRevisionValid(run.runId)) {
+        throw new Error("Reviewed worktree changed after preview; reverify before any Git side effect.");
+      }
+      const result = await executeDeliveryMutation(pendingMutation, preview.digest, confirmation) as {
+        number?: number; url?: string;
+      };
+      if (pendingMutation.kind === "commit") {
+        await previewNext({ kind: "push", payload: { worktreeId: run.worktreeId, remote: "origin" } });
+      } else if (pendingMutation.kind === "push") {
+        if (run.baseRef === "HEAD") throw new Error("Legacy run has no concrete target branch; reconcile before opening a PR.");
+        const title = ("Fixes #" + run.issueNumber + ": " + run.issueTitle).slice(0, 512);
+        const checksSummary = run.checks.map((check) =>
+          "- " + (check.passed ? "PASS" : "FAIL") + " " + check.label + ": " + check.command
+          + " (exit " + (check.code ?? "unknown") + ")").join("\n");
         const body = [
-          `Resolves #${run.issueNumber}.`,
+          "Resolves #" + run.issueNumber + ".",
           "",
-          "## Checks",
+          "## Changes",
+          changedFiles.length ? changedFiles.map((file) => "- " + file).join("\n") : "See the owned-branch PR diff.",
+          "",
+          "## Authoritative local verification",
           checksSummary,
           "",
-          "## Non-goals",
-          "This draft was opened by Little Monkey's Issue-to-PR flow. Merge, force-push, branch deletion, and review-thread resolution are handled by a human reviewer, never by this flow.",
+          "## Independent review and limitations",
+          run.reviewEvidence ? "Reviewed changed files: " + run.reviewEvidence.filesReviewed.join(", ") : "No review evidence",
+          "Review evidence is retained in the autonomous task run ledger and tied to the exact tested diff. CI checks are observed against the PR head. Human approval is required before publication. No automatic merge or force-push.",
         ].join("\n");
-        const nextMutation: DeliveryMutation = {
-          kind: "create_draft_pr",
-          payload: { worktreeId: run.worktreeId, base: "main", title, body },
-        };
-        const next = await prepareDeliveryMutation(nextMutation);
-        setPreview(next);
-        setPendingMutation(nextMutation);
+        const mutation: DeliveryMutation = run.prNumber
+          ? { kind: "update_draft_pr", payload: { worktreeId: run.worktreeId, prNumber: run.prNumber, title, body } }
+          : { kind: "create_draft_pr", payload: { worktreeId: run.worktreeId, base: run.baseRef, title, body } };
+        await previewNext(mutation);
       } else {
-        const result = (await executeDeliveryMutation(pendingMutation, preview.digest, confirmation)) as {
-          number?: number;
-          url?: string;
-        };
+        const number = result.number ?? run.prNumber;
+        const url = result.url ?? run.prUrl;
+        if (!number || !url) throw new Error("GitHub did not provide a verifiable draft PR identity.");
+        // The GitHub mutation already happened. Never leave an executable
+        // create/update preview active if persisting its identity fails.
+        try {
+          await onOpened(number, url);
+        } catch (persistError) {
+          setPreview(null);
+          setPendingMutation(null);
+          setConfirmation("");
+          throw new Error("Draft PR exists at " + url + ", but local run tracking failed: " +
+            errorText(persistError) + ". Reconcile the existing PR; do not create another.");
+        }
         reset();
-        if (result.number && result.url) onOpened(result.number, result.url);
       }
     } catch (err) {
       setError(errorText(err));
@@ -138,6 +181,9 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
   const { t } = useT();
   const store = useIssueToPrStore();
   const [issueUrl, setIssueUrl] = useState("");
+  const [maxRepairAttempts, setMaxRepairAttempts] = useState(2);
+  const [agentMinutes, setAgentMinutes] = useState(30);
+  const [totalTokenBudget, setTotalTokenBudget] = useState(250_000);
 
   useEffect(() => {
     void store.init();
@@ -148,8 +194,9 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
     [store.runs, store.selectedRunId],
   );
 
-  const pr = usePrConfirmFlow(selected, (prNumber, prUrl) => {
-    if (selected) void store.markPrOpened(selected.runId, prNumber, prUrl);
+  const pr = usePrConfirmFlow(selected, async (prNumber, prUrl) => {
+    if (!selected) throw new Error("The issue run is no longer selected.");
+    await store.markPrOpened(selected.runId, prNumber, prUrl);
   });
 
   useEffect(() => {
@@ -194,7 +241,7 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
         onSubmit={(event) => {
           event.preventDefault();
           if (!issueUrl.trim() || starting) return;
-          void store.start(issueUrl.trim()).then(() => setIssueUrl(""));
+          void store.start(issueUrl.trim(), maxRepairAttempts, agentMinutes * 60_000, totalTokenBudget).then(() => setIssueUrl(""));
         }}
       >
         <label className="min-w-64 flex-1 text-xs text-muted">
@@ -205,6 +252,24 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
             value={issueUrl}
             onChange={(event) => setIssueUrl(event.target.value)}
           />
+        </label>
+        <label className="text-xs text-muted">
+          Max repairs
+          <select aria-label="Maximum CI repair attempts" className="mt-1 block rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground" value={maxRepairAttempts} onChange={(event) => setMaxRepairAttempts(Number(event.target.value))}>
+            {[0, 1, 2, 3, 4, 5].map((count) => <option key={count} value={count}>{count}</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-muted">
+          Agent time
+          <select aria-label="Agent time budget" className="mt-1 block rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground" value={agentMinutes} onChange={(event) => setAgentMinutes(Number(event.target.value))}>
+            {[5, 15, 30, 60, 120].map((minutes) => <option key={minutes} value={minutes}>{minutes} min</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-muted">
+          Token budget
+          <select aria-label="Total agent token budget" className="mt-1 block rounded-md border border-border bg-background px-2 py-2 text-sm text-foreground" value={totalTokenBudget} onChange={(event) => setTotalTokenBudget(Number(event.target.value))}>
+            {[50_000, 100_000, 250_000, 500_000, 1_000_000].map((tokens) => <option key={tokens} value={tokens}>{(tokens / 1_000).toFixed(0)}k</option>)}
+          </select>
         </label>
         <Button type="submit" variant="primary" disabled={starting || !issueUrl.trim()}>
           {starting ? <Loader2 className="animate-spin" size={14} /> : <Play size={14} />} {t("IssueToPr.startButton")}
@@ -337,6 +402,9 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
                 </p>
               )}
 
+              <IssueToPrTimeline run={selected} />
+              <p className="text-xs text-muted">Frozen execution policy: {Math.round(selected.agentWallTimeMs / 60_000)} minutes per agent · {selected.tokensUsed.toLocaleString()} / {selected.totalTokenBudget.toLocaleString()} provider-reported tokens · {selected.repairAttempts} / {selected.maxRepairAttempts} repair attempts.</p>
+
               {selected.checks.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold text-foreground">{t("IssueToPr.checksHeading")}</h4>
@@ -382,14 +450,16 @@ export function IssueToPrPanel({ onClose, onOpenRunCapsule }: IssueToPrPanelProp
                     <Square size={13} /> {t("IssueToPr.cancelButton")}
                   </Button>
                 )}
-                {selected.status === "awaiting_review" && selected.prUrl && (
+                {["awaiting_review", "monitoring_ci", "ready", "done"].includes(selected.status) && selected.prUrl && (
                   <>
                     <Button size="sm" onClick={() => window.open(selected.prUrl ?? undefined, "_blank", "noopener,noreferrer")}>
                       <ExternalLink size={13} /> {t("IssueToPr.openPrLinkButton")}
                     </Button>
-                    <Button size="sm" variant="primary" disabled={store.busy[`done:${selected.runId}`]} onClick={() => void store.markDone(selected.runId)}>
-                      <CheckCircle2 size={13} /> {t("IssueToPr.markDoneButton")}
-                    </Button>
+                    {selected.status === "ready" && (
+                      <Button size="sm" variant="primary" disabled={store.busy[`done:${selected.runId}`]} onClick={() => void store.markDone(selected.runId)}>
+                        <CheckCircle2 size={13} /> {t("IssueToPr.markDoneButton")}
+                      </Button>
+                    )}
                   </>
                 )}
                 {selected.durableRunId && onOpenRunCapsule && (
@@ -455,6 +525,9 @@ function statusLabelSuffix(status: IssueToPrStatus): string {
     case "checking": return "Checking";
     case "opening_pr": return "OpeningPr";
     case "awaiting_review": return "AwaitingReview";
+    case "monitoring_ci": return "MonitoringCi";
+    case "repairing": return "Repairing";
+    case "ready": return "Ready";
     case "done": return "Done";
     case "failed": return "Failed";
     case "cancelled": return "Cancelled";
