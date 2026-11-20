@@ -407,7 +407,7 @@ jobs:
           dbus-run-session -- bash -lc '
             set -euo pipefail
             unset GNOME_KEYRING_CONTROL
-            # Each hosted runner's pre-existing login collection may be locked
+            # The pre-existing login collection on a hosted runner may be locked
             # even after the daemon has acquired org.freedesktop.secrets.
             # Isolate a fresh empty-password keyring for the disposable CI run.
             export XDG_DATA_HOME="$(mktemp -d "$RUNNER_TEMP/lm-rust-keyring.XXXXXXXX")"
@@ -434,7 +434,7 @@ jobs:
             # Verify an actual storage round trip, not merely DBus ownership.
             # This prevents seven unrelated OAuth tests from failing with
             # org.freedesktop.Secret.Error.IsLocked late in a long Rust suite.
-            secret_id="lm-ci-$"
+            secret_id="lm-ci-$$"
             printf "ci-keyring-probe" | timeout 15s secret-tool store --label="Little Monkey CI probe" ci-service "$secret_id"
             stored="$(timeout 15s secret-tool lookup ci-service "$secret_id")"
             test "$stored" = "ci-keyring-probe" || { echo "CI keyring round-trip failed" >&2; exit 1; }
@@ -447,7 +447,7 @@ jobs:
             # Channel-agent E2E tests spawn the real CLI. Build it first;
             # cargo test alone produces a test harness, not the CLI executable.
             cargo build --locked --manifest-path src-tauri/Cargo.toml --bin monkey-cli
-            # Preserve the REAL executable through tauri-build's next
+            # Preserve the REAL executable through the next tauri-build
             # externalBin copy; an empty bootstrap placeholder could
             # otherwise replace the already-linked CLI during cargo test.
             node scripts/ensure-cli-sidecar-placeholder.mjs
