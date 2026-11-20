@@ -217,7 +217,9 @@ describe("issueToPrStore", () => {
   });
 
   it("cancel aborts the in-flight run's signal and persists the cancellation", async () => {
-    const run = fixtureRun({ status: "implementing" });
+    // A fresh intake is "planning"; a nonterminal intake would take the
+    // reattach path instead (see the repeated-Start test above).
+    const run = fixtureRun();
     api.startIssueToPr.mockResolvedValue(run);
     api.advanceIssueToPr.mockResolvedValue({ ...run, status: "implementing" });
     let capturedSignal: AbortSignal | undefined;
