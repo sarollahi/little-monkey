@@ -32,8 +32,8 @@ test("each platform picks the installer a hosted runner can actually exercise", 
   // configuration this repo supports.
   assert.equal(installPlanFor("linux", ["app.AppImage"]).kind, "appimage");
 
-  assert.equal(installPlanFor("darwin", ["app_aarch64.dmg"]).kind, "dmg");
-  assert.equal(installPlanFor("win32", ["app_1.2.0_x64-setup.exe"]).kind, "nsis");
+  assert.equal(installPlanFor("darwin", ["app_aarch64.dmg"], "arm64").kind, "dmg");
+  assert.equal(installPlanFor("win32", ["app_1.2.0_x64-setup.exe"], "x64").kind, "nsis");
 
   // The MSI is deliberately not used — it needs elevation — so an MSI-only set
   // has no plan, which the caller turns into a SKIPPED with a reason.
@@ -42,12 +42,30 @@ test("each platform picks the installer a hosted runner can actually exercise", 
   assert.equal(installPlanFor("freebsd", ["app.pkg"]), null);
 });
 
+test("install selection respects host architecture even when other assets sort first", () => {
+  const linux = [
+    "Little.Monkey_1.12.0_arm64.deb",
+    "Little.Monkey_1.12.0_amd64.deb",
+    "Little.Monkey_1.12.0_aarch64.AppImage",
+  ];
+  assert.equal(installPlanFor("linux", linux, "x64").asset, linux[1]);
+  assert.equal(installPlanFor("linux", linux, "arm64").asset, linux[0]);
+  assert.equal(installPlanFor("linux", [linux[0]], "x64"), null);
+  const windows = ["Little.Monkey_1.12.0_arm64-setup.exe", "Little.Monkey_1.12.0_x64-setup.exe"];
+  assert.equal(installPlanFor("win32", windows, "x64").asset, windows[1]);
+  assert.equal(installPlanFor("win32", windows, "arm64").asset, windows[0]);
+  const mac = ["Little.Monkey_1.12.0_aarch64.dmg", "Little.Monkey_1.12.0_x64.dmg"];
+  assert.equal(installPlanFor("darwin", mac, "arm64").asset, mac[0]);
+  assert.equal(installPlanFor("darwin", mac, "x64").asset, mac[1]);
+  assert.equal(installPlanFor("linux", linux, "riscv64"), null);
+});
+
 test("a missing payload file is a failure, not a skip", () => {
   // The installer ran, so this is a real answer about a real install.
   const expected = expectedPayload("linux");
   const result = checkPayload(["usr/bin/little-monkey"], expected);
   assert.equal(result.outcome, OUTCOME.Fail);
-  assert.match(result.reason, /usr\/lib\/little-monkey\/monkey/);
+  assert.match(result.reason, /usr\/bin\/monkey-cli/);
 
   assert.equal(checkPayload(expected, expected).outcome, OUTCOME.Pass);
 });
@@ -57,7 +75,7 @@ test("every platform names the CLI sidecar, which is the half packaging loses", 
     const payload = expectedPayload(platform);
     assert.ok(payload.length > 0, `${platform} expects nothing`);
     assert.ok(
-      payload.some((path) => /monkey(\.exe)?$/.test(path)),
+      payload.some((path) => /(monkey|monkey-cli)(\.exe)?$/.test(path)),
       `${platform} does not check for the CLI sidecar`,
     );
   }
@@ -138,4 +156,9 @@ test("only a real failure fails the release", () => {
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Skip }]), 0);
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Skip }, { outcome: OUTCOME.Skip }]), 0);
   assert.equal(exitCodeFor([{ outcome: OUTCOME.Pass }, { outcome: OUTCOME.Fail }]), 1);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Skip }], { requireClean: true }), 1);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Pass }, { name: "upgrade", outcome: OUTCOME.Skip }], { requireClean: true }), 0);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Pass }, { name: "upgrade", outcome: OUTCOME.Skip }], { requireUpgrade: true }), 1);
+  assert.equal(exitCodeFor([{ name: "clean install", outcome: OUTCOME.Pass }, { name: "upgrade", outcome: OUTCOME.Pass }], { requireClean: true, requireUpgrade: true }), 0);
+  assert.equal(exitCodeFor([], { requireClean: true }), 1);
 });

@@ -1,6 +1,6 @@
 # Accelerated VDN-H3 in Little Monkey Studio
 
-This is a stacked follow-on to [#629](https://github.com/AA-Box/little-monkey/pull/629):
+This is a stacked follow-on to [#629](https://github.com/sarollahi/little-monkey/pull/629):
 the original portable Diffusers backend remains, while Studio now provides
 **three independent actual inference paths**. The model's MiniMax H3 regional
 license restrictions apply identically to every path. Neither changing the

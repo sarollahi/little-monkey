@@ -34,7 +34,7 @@ export function summarizeRelease(release) {
 }
 
 async function main() {
-  const response = await fetch('https://api.github.com/repos/AA-Box/little-monkey/releases/latest', {
+  const response = await fetch('https://api.github.com/repos/sarollahi/little-monkey/releases/latest', {
     headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'little-monkey-public-release-download-report' },
   });
   if (!response.ok) throw new Error(`GitHub API HTTP ${response.status}: ${response.statusText}`);

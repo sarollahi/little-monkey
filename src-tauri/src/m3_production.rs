@@ -109,7 +109,7 @@ const KEYCHAIN_ACCOUNT: &str = "lan-state-hmac-v1";
 /// what it lists is still only installable after the digest and, for a signed
 /// component, the pinned publisher key both check out.
 pub const DEFAULT_COMPONENT_CATALOG_URL: &str =
-    "https://github.com/AA-Box/little-monkey/releases/download/mlx-catalog/mlx-catalog.json";
+    "https://github.com/sarollahi/little-monkey/releases/download/mlx-catalog/mlx-catalog.json";
 const MLX_RELEASE_KEY_ID: &str = "release-2026-1";
 const MLX_RELEASE_PUBLIC_KEY_HEX: &str =
     "84db8c4dfdca72589631be1513f45083e893c9c373ba5be6e49928e43c7b828c";
@@ -6489,7 +6489,7 @@ GPU1:
             accelerator: None,
             version: "0.28.4".to_string(),
             channel: M3ComponentChannel::Beta,
-            download_url: "https://github.com/AA-Box/little-monkey/releases/download/mlx-runtime-0.28.4/mlx-runtime-0.28.4.tar.gz".to_string(),
+            download_url: "https://github.com/sarollahi/little-monkey/releases/download/mlx-runtime-0.28.4/mlx-runtime-0.28.4.tar.gz".to_string(),
             sha256: "a".repeat(64),
             size_bytes: 314_572_800,
             published_at_ms: 1_754_000_000_000,

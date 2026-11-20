@@ -91,8 +91,18 @@ jobs:
         with:
           workspaces: src-tauri
           key: local-whisper-${{ matrix.target }}-portable-cxxabi0
-      - name: Compile Little Monkey with built-in Whisper
-        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --lib --target ${{ matrix.target }}
+      - name: Force regeneration of real whisper.cpp build flags evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build output may be restored without the CMake cache on hosted
+          # runners; an absent cache is not proof of portable CPU flags.
+          cargo clean --manifest-path src-tauri/Cargo.toml -p whisper-rs-sys --target ${{ matrix.target }}
+
+      - name: Build and link Little Monkey with real built-in Whisper
+        # cargo check can stop before producing retained native object files;
+        # a release portability assertion must inspect actual linked bits.
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --lib --target ${{ matrix.target }}
       # Releases are built on these same runners. Left to its default, ggml
       # tunes whisper.cpp to the runner's CPU, and the installer then dies with
       # SIGILL on a user's machine without it (see .cargo/config.toml).
@@ -100,7 +110,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for cache in src-tauri/target/${{ matrix.target }}/debug/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
+          target="src-tauri/target/${{ matrix.target }}"
+          # The native CMake crate may put its cache under an alternate `out/`
+          # prefix. Search *actual generated files*, then retain only caches
+          # that declared GGML_NATIVE. Do not count unrelated CMake builds.
+          # macOS GitHub runners use Bash 3.2, which has no mapfile.
+          # NUL-delimited read preserves spaces without relying on newer Bash.
+          all_caches=()
+          while IFS= read -r -d '' found_cache; do
+            all_caches+=("$found_cache")
+          done < <(find "$target" -type f -name CMakeCache.txt -print0)
+          caches=()
+          for cache in "${all_caches[@]}"; do
+            if grep -q '^GGML_NATIVE:' "$cache"; then
+              caches+=("$cache")
+            fi
+          done
+          if [ "${#caches[@]}" -eq 0 ]; then
+            echo "::error::No GGML_NATIVE CMakeCache.txt found after a real native build"
+            echo "Generated CMake caches (unverified):" >&2
+            printf '%s\\n' "${all_caches[@]}" >&2
+            exit 1
+          fi
+          for cache in "${caches[@]}"; do
             echo "$cache"
             grep -E '^(GGML_NATIVE|GGML_CPU_ARM_ARCH|GGML_AVX512|HAVE_[A-Z0-9_]+):' "$cache"
             grep -q '^GGML_NATIVE:BOOL=OFF' "$cache"

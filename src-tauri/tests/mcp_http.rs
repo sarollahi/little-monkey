@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use rmcp::model::{
     CallToolResult, ClientJsonRpcMessage, ClientRequest, ContentBlock, JsonRpcMessage,
-    ListToolsResult, ServerCapabilities, ServerInfo, ServerJsonRpcMessage, ServerResult, Tool,
+    ListToolsResult, ServerCapabilities, ServerConfig, ServerJsonRpcMessage, ServerResult, Tool,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -148,7 +148,7 @@ async fn handle_one_request(
             let id = req.id.clone();
             let result = match req.request {
                 ClientRequest::InitializeRequest(_) => ServerResult::from(
-                    ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+                    ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
                         .with_instructions(TEST_INSTRUCTIONS),
                 ),
                 ClientRequest::ListToolsRequest(_) => {

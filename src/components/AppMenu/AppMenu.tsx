@@ -45,7 +45,7 @@ import { useLocaleStore } from "../../store/localeStore";
 import packageMetadata from "../../../package.json";
 
 const APP_VERSION = packageMetadata.version;
-const HELP_URL = "https://github.com/AA-Box/little-monkey#readme";
+const HELP_URL = "https://github.com/sarollahi/little-monkey#readme";
 
 interface AppMenuProps {
   onOpenSettings: () => void;

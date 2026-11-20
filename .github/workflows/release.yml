@@ -1,19 +1,46 @@
 name: Release
 
+# Publishing is deliberately manual. A push to main no longer creates a release.
+# The operator must select the main branch and affirm reviewed live evidence.
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      approve_publish:
+        description: "I reviewed passing required release acceptance and approve publishing"
+        type: boolean
+        required: true
+        default: false
+      acceptance_report:
+        description: "URL of human-reviewed real-hardware and upgrade acceptance evidence"
+        type: string
+        required: true
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   preflight:
     runs-on: ubuntu-22.04
 
     steps:
+      - name: Require explicit manual authorization and main branch
+        shell: bash
+        env:
+          APPROVED: ${{ inputs.approve_publish }}
+          ACCEPTANCE_REPORT: ${{ inputs.acceptance_report }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || [ "$APPROVED" != "true" ]; then
+            echo "Release blocked: manual approval on the main branch is required" >&2
+            exit 1
+          fi
+          if [[ ! "$ACCEPTANCE_REPORT" =~ ^https:// ]]; then
+            echo "Release blocked: a reviewed acceptance evidence URL is mandatory" >&2
+            exit 1
+          fi
+          echo "Operator-supplied evidence (reviewed manually; URL presence is not automated proof): $ACCEPTANCE_REPORT" >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -23,8 +50,83 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Require passing CI on exact main source commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -X GET "repos/${{ github.repository }}/actions/runs" \
+            -f head_sha="$GITHUB_SHA" -f per_page=100 \
+            > "$RUNNER_TEMP/release-source-ci.json"
+          node scripts/release-ci-source-gate.mjs \
+            --metadata "$RUNNER_TEMP/release-source-ci.json" \
+            --commit "$GITHUB_SHA"
+
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
+
+      - name: Refuse overwriting an already published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if gh release view "$VERSION" --json isDraft --jq .isDraft > "$RUNNER_TEMP/release-exists.txt" 2>/dev/null; then
+            if [ "$(cat "$RUNNER_TEMP/release-exists.txt")" != "true" ]; then
+              echo "Refusing to modify previously published release $VERSION" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Enforce production updater and Linux installer signing credentials
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Key presence is a prerequisite, not proof of a matching key or
+          # artifact signature; the bundler and GPG must still sign and verify.
+          for key in TAURI_SIGNING_PRIVATE_KEY GPG_PRIVATE_KEY GPG_PASSPHRASE; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::$key is absent; refuse an unsigned release"
+              exit 1
+            fi
+          done
+          echo "Required signing credentials are configured (their validity is checked during signing)."
+
+      - name: Enforce macOS Developer ID signing and notarization credentials
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for key in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD \
+                     APPLE_SIGNING_IDENTITY APPLE_ID \
+                     APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::Missing $key: refuse production release without notarized macOS signing"
+              exit 1
+            fi
+          done
+
+      - name: Block publication on current Rust security advisories
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked
+          cargo audit --file src-tauri/Cargo.lock
+
+      - name: Block publication on production npm security advisories
+        run: pnpm audit --prod --audit-level high
 
       - name: Release preflight
         run: pnpm release:preflight
@@ -203,6 +305,26 @@ jobs:
           # No-op when the signing secrets are missing (nothing to describe).
           includeUpdaterJson: true
 
+      - name: Verify actual macOS app Developer ID signature and Gatekeeper assessment
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          APP="$(find "$BUNDLE" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP" ]; then
+            echo "::error::No macOS app bundle to inspect"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          details="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+          grep -Fq "Authority=Developer ID Application:" <<< "$details"
+          grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" <<< "$details"
+          spctl --assess --type execute --verbose=4 "$APP"
+          echo "Verified macOS Developer ID signature and Gatekeeper approval for ${{ matrix.target }}" >> "$GITHUB_STEP_SUMMARY"
+
       # The updater signature above only covers the .AppImage the in-app
       # updater downloads. Someone who grabs a .deb or .rpm from the releases
       # page has nothing to verify against, and Linux has no Gatekeeper to
@@ -216,12 +338,11 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
-          # Same contract as the updater secrets above: no key configured means
-          # the release still ships, just unsigned. The `secrets` context is not
-          # readable from a step-level `if`, so the guard lives here.
-          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "GPG_PRIVATE_KEY unset — skipping installer signatures"
-            exit 0
+          # Production releases must never omit Linux installer signatures.
+          # A missing secret is fatal even if another platform signed its assets.
+          if [ -z "${GPG_PRIVATE_KEY:-}" ] || [ -z "${GPG_PASSPHRASE:-}" ]; then
+            echo "::error::Missing Linux installer signing credentials"
+            exit 1
           fi
           # `gpg --import` exits 2 when it logs any error at all, including a
           # malformed armor header line, even when the key itself imported —
@@ -232,9 +353,14 @@ jobs:
           # this step needs answered, so ask the keyring instead: an empty
           # KEY_ID is the real failure and stays fatal.
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import || true
-          KEY_ID="$({ gpg --list-secret-keys --with-colons || true; } | awk -F: '/^sec:/ {print $5; exit}')"
-          if [ -z "$KEY_ID" ]; then
-            echo "GPG_PRIVATE_KEY is set but no secret key was imported — refusing to ship unsigned installers"
+          # Pin the exact public release signer established by v1.12.0.
+          # The key UID alone is not identity authentication; a rotated key
+          # requires a separately reviewed pin update rather than silent use.
+          KEY_ID="$({ gpg --batch --list-secret-keys --with-colons --fingerprint || true; } \
+            | awk -F: '/^fpr:/ {print $10; exit}')"
+          EXPECTED_KEY_ID="$(node -p "require('./scripts/release-trust-pins.json').linux_gpg_fingerprint")"
+          if [ -z "$KEY_ID" ] || [ "$KEY_ID" != "$EXPECTED_KEY_ID" ]; then
+            echo "::error::Unexpected Linux release signer fingerprint; refuse an unsigned or key-swapped release"
             exit 1
           fi
           BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"
@@ -372,21 +498,35 @@ jobs:
           gh release download "$PREVIOUS" --dir previous --clobber || \
             echo "the previous release ($PREVIOUS) published nothing downloadable"
 
+      - name: Verify downloaded release artifact SHA-256 digests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          gh api "repos/${{ github.repository }}/releases/tags/$VERSION" > "$RUNNER_TEMP/release-assets.json"
+          node scripts/release-asset-integrity.mjs \
+            --metadata "$RUNNER_TEMP/release-assets.json" \
+            --artifacts artifacts
+
       - name: Clean install and upgrade smoke test
         shell: bash
         run: |
           node scripts/install-smoke.mjs \
             --artifacts artifacts \
             --previous previous \
-            --previous-version "${PREVIOUS_VERSION:-}"
+            --previous-version "${PREVIOUS_VERSION:-}" \
+            --require-clean
 
   # Publishing is what makes the release real: GitHub serves no draft assets,
   # so until this runs `/releases/latest/download/latest.json` 404s and no
   # installed app sees the update. It needs the whole matrix, so a target that
   # failed leaves the release a draft rather than shipping a partial one.
   publish:
-    # Waits on the smoke test too: a release that cannot be installed must not
-    # be published. A skipped leg does not block — it is reported, not fatal.
+    # A platform missing its required clean-install artifact now fails closed.
+    # Skipped optional upgrade or platform-unsupported legs stay visible, not passes.
+    # Physical upgrades, code-signing and rollback still need manual evidence.
     needs: [release, install-smoke, ide-extensions]
     runs-on: ubuntu-22.04
 
@@ -411,6 +551,19 @@ jobs:
           set -euo pipefail
           VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
           gh release upload "$VERSION" little-monkey-sbom.cyclonedx.json --clobber
+
+      - name: Refuse incomplete or unsigned draft release asset inventory
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          gh api "repos/${{ github.repository }}/releases/tags/$VERSION" \
+            > "$RUNNER_TEMP/release-prepublish.json"
+          node scripts/release-manifest-gate.mjs \
+            --metadata "$RUNNER_TEMP/release-prepublish.json" \
+            --version "$VERSION"
 
       - name: Publish the release
         env:
