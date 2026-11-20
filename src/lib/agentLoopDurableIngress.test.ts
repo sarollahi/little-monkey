@@ -56,7 +56,8 @@ vi.mock("./ingressClient", async (importOriginal) => ({
   recoverableDesktopTurns: mocks.recoverableDesktopTurns,
 }));
 
-import { recoverDaemonDesktopTurns, runAgentTurn } from "./agentLoop";
+import { runAgentTurn } from "./agentLoop";
+import { recoverDaemonDesktopTurns } from "./daemonTurnRecovery";
 import { useModelStore } from "../store/modelStore";
 import { usePermissionStore } from "../store/permissionStore";
 import { useSessionStore, type ChatSession } from "../store/sessionStore";

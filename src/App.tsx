@@ -62,7 +62,6 @@ import {
   deliverProcessSignal,
   sweepPendingProcessSignals,
 } from "./lib/processSignalDelivery";
-import { recoverDaemonDesktopTurns } from "./lib/agentLoop";
 import { paletteClient } from "./lib/paletteClient";
 import { featurePanelReducer, type FeaturePanelId } from "./lib/appShellPanels";
 import { studioClient } from "./lib/studioClient";
@@ -922,9 +921,20 @@ function App() {
   // Each window may observe an existing daemon-owned turn. Recovery is now
   // read-only and the daemon alone owns execution, so a secondary session
   // window cannot start a duplicate tool merely by attaching to the ledger.
+  // Loaded on demand so the startup entry chunk does not carry the poller.
   useEffect(() => {
     if (!isTauri()) return;
-    return recoverDaemonDesktopTurns();
+    let disposed = false;
+    let dispose: (() => void) | undefined;
+    void import("./lib/daemonTurnRecovery")
+      .then(({ recoverDaemonDesktopTurns }) => {
+        if (!disposed) dispose = recoverDaemonDesktopTurns();
+      })
+      .catch((error) => console.warn("Durable session recovery failed to load:", error));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
   }, []);
 
   // Local App Builder (ROADMAP.md, Phase 3): a published app's static page
