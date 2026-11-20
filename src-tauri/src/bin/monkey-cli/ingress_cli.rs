@@ -22,6 +22,12 @@ pub enum IngressCmd {
         /// telephone.
         #[arg(long)]
         source: Option<String>,
+        /// Exact source account/session; filtering occurs before pagination.
+        #[arg(long)]
+        account: Option<String>,
+        /// Show accepted and running desktop/voice turns for reattachment.
+        #[arg(long)]
+        recoverable: bool,
         #[arg(long, default_value_t = 20)]
         limit: u32,
         #[arg(long)]
@@ -74,9 +80,11 @@ pub fn dispatch(command: &IngressCmd) -> Result<(), String> {
     match command {
         IngressCmd::List {
             source,
+            account,
+            recoverable,
             limit,
             json,
-        } => list(source.as_deref(), *limit, *json),
+        } => list(source.as_deref(), account.as_deref(), *recoverable, *limit, *json),
         IngressCmd::Show {
             source,
             account,
@@ -322,20 +330,22 @@ fn resume(
     Ok(())
 }
 
-pub fn list(source: Option<&str>, limit: u32, json: bool) -> Result<(), String> {
-    let filter = match source {
-        Some(value) => Some(
-            ConversationSource::parse(value)
-                .ok_or_else(|| format!("Unknown conversation source '{value}'"))?,
-        ),
-        None => None,
-    };
+pub fn list(source: Option<&str>, account: Option<&str>, recoverable: bool, limit: u32, json: bool) -> Result<(), String> {
+    let filter = source.map(parse_source).transpose()?;
+    if let Some(account) = account {
+        if account.is_empty() || account.len() > 256 || account.contains('\0') {
+            return Err("Invalid session/account identifier".into());
+        }
+    }
     let store = DaemonStore::open(&DaemonPaths::resolve()?)?;
-    let turns: Vec<StoredIngressTurn> = store
-        .recent_ingress_turns(limit.clamp(1, 200))?
-        .into_iter()
-        .filter(|turn| filter.is_none_or(|source| turn.source == source))
-        .collect();
+    if recoverable && (filter.is_some() || account.is_some()) {
+        return Err("--recoverable cannot be combined with --source or --account".into());
+    }
+    let turns: Vec<StoredIngressTurn> = if recoverable {
+        store.recoverable_desktop_turns(limit)?
+    } else {
+        store.recent_ingress_turns_filtered(filter, account, limit)?
+    };
 
     if json {
         let rows: Vec<serde_json::Value> = turns
@@ -533,7 +543,7 @@ mod tests {
 
     #[test]
     fn an_unknown_source_filter_is_refused_before_anything_is_read() {
-        assert!(list(Some("carrier pigeon"), 10, true)
+        assert!(list(Some("carrier pigeon"), None, false, 10, true)
             .expect_err("unknown source")
             .contains("carrier pigeon"));
     }

@@ -846,6 +846,16 @@ impl RemoteApi {
                 require_capability(device, DeviceCapability::ViewSessions)
                     .and_then(|_| self.mobile_sessions())
             }
+            // A paired device can observe a desktop/voice session only when
+            // BOTH its session capability and run/event scopes permit it.
+            // This is discovery, not admission: knowing a session ID never
+            // authorizes tools, cancellation, or additional workspace access.
+            ("GET", ["v1", "remote", "mobile", "sessions", session_id, "agent-turns"]) => {
+                require_capability(device, DeviceCapability::ViewSessions)
+                    .and_then(|_| require_action(scopes, RemoteAction::ViewRuns))
+                    .and_then(|_| require_action(scopes, RemoteAction::ViewEvents))
+                    .and_then(|_| self.mobile_agent_session_turns(scopes, session_id))
+            }
             ("GET", ["v1", "remote", "mobile", "sessions", session_id, "messages"]) => {
                 require_capability(device, DeviceCapability::ViewSessions)
                     .and_then(|_| self.mobile_messages_get(session_id, now_ms))
@@ -1891,6 +1901,64 @@ impl RemoteApi {
                     .collect::<Vec<_>>(),
             }),
             None,
+        ))
+    }
+
+    /// Read-only lookup of daemon-owned ordinary turns for an explicitly
+    /// paired session observer. Ingress supplies stable session/turn identity;
+    /// the run ledger + existing RemoteScopes enforce what the device may see.
+    /// Neither the frozen recipe nor prompt nor any tool argument is returned.
+    fn mobile_agent_session_turns(
+        &self,
+        scopes: &RemoteScopes,
+        session_id: &str,
+    ) -> Result<(u16, serde_json::Value, Option<String>), (u16, String)> {
+        super::protocol::validate_id(session_id).map_err(|error| (400, error))?;
+        let store = DaemonStore::open(&self.paths).map_err(internal)?;
+        let ledger = self.run_ledger()?;
+        let mut visible = Vec::new();
+        for source in [
+            little_monkey_lib::channels::ingress::ConversationSource::Desktop,
+            little_monkey_lib::channels::ingress::ConversationSource::Voice,
+        ] {
+            let turns = store.recent_ingress_turns_filtered(
+                Some(source), Some(session_id), 100,
+            ).map_err(internal)?;
+            for turn in turns {
+                let Some(job_id) = turn.job_id.as_deref() else { continue };
+                let Some(job) = store.get_job(job_id).map_err(internal)? else { continue };
+                let Some(run_id) = job.run_id.as_deref() else { continue };
+                let Some(run) = ledger.load_run(run_id).map_err(internal)? else { continue };
+                // Existing per-run/workspace allowlist is mandatory, even for
+                // devices with ViewSessions. Scope failure is indistinguishable
+                // from a session without work; no hidden run IDs are disclosed.
+                if !scopes.permits_run(&run) { continue }
+                visible.push(serde_json::json!({
+                    "session_id": session_id,
+                    "source": turn.source.as_str(),
+                    "turn_id": turn.source_event_id,
+                    "run_id": run_id,
+                    "run_state": job.state.token(),
+                    "created_at_ms": turn.created_at_ms,
+                    "execution_version": turn.execution_version,
+                    "next_events": format!("/v1/remote/runs/{run_id}/events?after=0"),
+                }));
+            }
+        }
+        visible.sort_by(|a, b| {
+            b["created_at_ms"].as_i64().cmp(&a["created_at_ms"].as_i64())
+                .then_with(|| b["run_id"].as_str().cmp(&a["run_id"].as_str()))
+        });
+        visible.truncate(100);
+        Ok((
+            200,
+            serde_json::json!({
+                "protocol_version": REMOTE_PROTOCOL_VERSION,
+                "session_id": session_id,
+                "turns": visible,
+                "read_only": true,
+            }),
+            Some(session_id.to_string()),
         ))
     }
 
@@ -6265,6 +6333,104 @@ mod tests {
                 "{method} {path} should be capability-denied"
             );
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn paired_session_attachment_respects_both_capability_and_run_scope() {
+        use little_monkey_lib::channels::ingress::{ConversationIngress, ConversationSource};
+        use little_monkey_lib::channels::routing::RouteTarget;
+
+        let (root, api, secrets, legacy_device, legacy_secret) = fixture();
+        let paths = DaemonPaths::under(&root);
+        let mut daemon = DaemonStore::open(&paths).unwrap();
+        let turn = ConversationIngress::direct(
+            ConversationSource::Desktop, "session-a", "turn-a",
+            "desktop:session-a", "private prompt never returned",
+            RouteTarget::new("chat"), 1_500,
+        );
+        let ingress_id = match daemon.accept_ingress_turn(&turn, &[], 1_500).unwrap() {
+            crate::daemon::ingress_store::IngressAcceptance::Accepted { ingress_id } => ingress_id,
+            _ => panic!("new turn expected"),
+        };
+        daemon.mark_ingress_queued(&ingress_id, "job-run-one", 1_501).unwrap();
+        drop(daemon);
+        const PATH: &str = "/v1/remote/mobile/sessions/session-a/agent-turns";
+
+        // A legacy pairing can view runs, but not an ordinary desktop session.
+        let forbidden = api.handle(
+            signed(&legacy_device, &legacy_secret, 1, "legacy-session",
+                   "GET", PATH, b""), 2_000,
+        );
+        assert_eq!(forbidden.status, 403);
+
+        let pair = |name: &str, run_ids: BTreeSet<String>,
+                    actions: BTreeSet<RemoteAction>,
+                    capabilities: BTreeSet<DeviceCapability>| {
+            let mut store = RemoteStore::open(&paths.root).unwrap();
+            let scopes = RemoteScopes {
+                actions, run_ids, workspace_ids: BTreeSet::new(),
+                max_artifact_bytes: 1_024,
+            };
+            let invite = store.create_invitation_with_capabilities(
+                &scopes, &capabilities, 1_000, 3_000,
+            ).unwrap();
+            let accepted = store.accept_invitation(
+                &invite.pairing_id, &invite.token, name, "runner-one", 1_100,
+                secrets.as_ref(),
+            ).unwrap();
+            (accepted.device_id, accepted.device_secret.as_bytes().to_vec())
+        };
+        let actions = BTreeSet::from([
+            RemoteAction::ViewRuns, RemoteAction::ViewEvents,
+        ]);
+        let capabilities = BTreeSet::from([
+            DeviceCapability::ViewRuns, DeviceCapability::ViewEvents,
+            DeviceCapability::ViewSessions,
+        ]);
+        let (device, secret) = pair(
+            "allowed", BTreeSet::from(["run-one".into()]),
+            actions.clone(), capabilities.clone(),
+        );
+        let response = api.handle(
+            signed(&device, &secret, 1, "allowed-session",
+                   "GET", PATH, b""), 2_000,
+        );
+        assert_eq!(response.status, 200, "{:?}", response.body);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["read_only"], true);
+        assert_eq!(body["turns"].as_array().unwrap().len(), 1);
+        assert_eq!(body["turns"][0]["run_id"], "run-one");
+        assert_eq!(body["turns"][0]["turn_id"], "turn-a");
+        assert!(!String::from_utf8_lossy(&response.body).contains("private prompt"));
+        // Session discovery must not bypass a narrower pairing that has
+        // metadata permission but no right to consume the event stream.
+        let (metadata_only, metadata_secret) = pair(
+            "metadata-only", BTreeSet::from(["run-one".into()]),
+            BTreeSet::from([RemoteAction::ViewRuns]),
+            BTreeSet::from([
+                DeviceCapability::ViewRuns, DeviceCapability::ViewSessions,
+            ]),
+        );
+        let metadata_response = api.handle(
+            signed(&metadata_only, &metadata_secret, 1, "metadata-session",
+                   "GET", PATH, b""), 2_000,
+        );
+        assert_eq!(metadata_response.status, 403);
+
+        // Even an authenticated device with ViewSessions cannot infer the
+        // existence or ID of a run outside its existing run allowlist.
+        let (scoped_device, scoped_secret) = pair(
+            "scoped", BTreeSet::from(["run-elsewhere".into()]),
+            actions, capabilities,
+        );
+        let scoped = api.handle(
+            signed(&scoped_device, &scoped_secret, 1, "scoped-session",
+                   "GET", PATH, b""), 2_000,
+        );
+        assert_eq!(scoped.status, 200);
+        let scoped_body: serde_json::Value = serde_json::from_slice(&scoped.body).unwrap();
+        assert!(scoped_body["turns"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

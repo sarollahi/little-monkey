@@ -604,6 +604,22 @@ export function projectDaemonTurnEvents(
       case "tool_proposed": next.status = `Preparing ${event.payload.tool_name}…`; break;
       case "tool_started": next.status = "Running an approved tool…"; break;
       case "permission_requested": next.status = `Waiting for approval: ${event.payload.tool_name}`; break;
+      case "awaiting_approval":
+        next.status = event.payload.reason
+          ? `Waiting for approval: ${event.payload.reason}`
+          : "Waiting for approval from the authorized operator.";
+        break;
+      case "permission_decided":
+        next.status = "Permission decision recorded; resident agent continuing…"; break;
+      case "verification_finished":
+        next.status = event.payload.passed
+          ? `Verification passed: ${event.payload.name}`
+          : `Verification failed: ${event.payload.name}`;
+        break;
+      case "external_mutation_prepared":
+        next.status = "External operation prepared; awaiting confirmed outcome."; break;
+      case "external_mutation_confirmed":
+        next.status = "External operation confirmed in durable ledger."; break;
       case "paused": next.status = "Background turn paused."; break;
       case "cancelling": next.status = "Stopping background turn…"; break;
       case "completed": next.summary = event.payload.summary; break;
@@ -613,9 +629,19 @@ export function projectDaemonTurnEvents(
       default: break;
     }
   }
+  if (run?.status === "waiting_for_permission" && !next.status.includes("approval")) {
+    next.status = "Waiting for approval from the authorized operator.";
+  } else if (run?.status === "paused") {
+    next.status = "Resident agent paused.";
+  } else if (run?.status === "cancelling") {
+    next.status = "Resident agent cancellation requested.";
+  }
   if (run?.status && ["succeeded", "failed", "cancelled", "needs_reconciliation"].includes(run.status)) {
     next.terminal = true;
     next.terminalStatus = run.status;
+    if (run.status === "needs_reconciliation" && !next.error) {
+      next.error = "A prior external operation has an ambiguous outcome; inspection is required.";
+    }
   }
   return next;
 }
@@ -650,7 +676,11 @@ export function loadActiveDaemonTurns(): ActiveDaemonDesktopTurn[] {
 }
 
 export function saveActiveDaemonTurn(link: ActiveDaemonDesktopTurn): void {
-  const entries = loadActiveDaemonTurns().filter((entry) => entry.runId !== link.runId);
+  // One local pointer per session; older generations remain readable from
+  // authoritative ingress/RunLedger, never through conflicting cache entries.
+  const entries = loadActiveDaemonTurns().filter(
+    (entry) => entry.runId !== link.runId && entry.sessionId !== link.sessionId,
+  );
   entries.push(link);
   storage()?.setItem(ACTIVE_TURNS_KEY, JSON.stringify(entries));
 }
@@ -721,27 +751,130 @@ export async function watchDaemonDesktopTurn(
   initialLink: ActiveDaemonDesktopTurn,
   signal: AbortSignal,
   callbacks: WatchDaemonTurnCallbacks,
+  /** A reattached observer must never be able to cancel its daemon by merely
+   * disconnecting. Only a new original turn owns abort-to-cancel semantics. */
+  cancelOnAbort = true,
 ): Promise<DaemonTurnProjection> {
   let link = { ...initialLink };
   let projection = emptyProjection(link);
   const watched = new Set<string>([link.runId]);
   let lastHoldLookupMs = 0;
   let heldDetail: string | null = null;
-  let cancelSent = false;
+  let consecutiveReadFailures = 0;
+  let cancelAcknowledged = false;
+  let cancelInFlight = false;
+  let lastCancelAttemptMs = 0;
   const requestCancel = () => {
-    if (cancelSent) return;
-    cancelSent = true;
-    void daemonCancel(link.runId, "Stopped from desktop chat").catch(() => undefined);
+    if (cancelAcknowledged || cancelInFlight) return;
+    cancelInFlight = true;
+    lastCancelAttemptMs = Date.now();
+    void daemonCancel(link.runId, "Stopped from desktop chat")
+      .then(() => { cancelAcknowledged = true; })
+      .catch(() => undefined)
+      .finally(() => { cancelInFlight = false; });
   };
-  signal.addEventListener("abort", requestCancel, { once: true });
-  if (signal.aborted) requestCancel();
+  if (cancelOnAbort) {
+    signal.addEventListener("abort", requestCancel, { once: true });
+    if (signal.aborted) requestCancel();
+  }
   try {
     for (;;) {
-      const [events, run] = await Promise.all([
-        loadRunEvents(link.runId, link.lastSequence, 1_000),
-        getRun(link.runId),
-      ]);
-      projection = projectDaemonTurnEvents(projection, events, run);
+      if (signal.aborted && !cancelOnAbort) return projection;
+      // Stop intent is an idempotent daemon control. A lost IPC response does
+      // not prove the cancellation was accepted; retry under the same run ID.
+      if (signal.aborted && cancelOnAbort && !cancelAcknowledged &&
+          Date.now() - lastCancelAttemptMs >= 2_000) requestCancel();
+      let events: RunEventEnvelopeWire[];
+      let run: RunRecord | null;
+      try {
+        [events, run] = await Promise.all([
+          loadRunEvents(link.runId, link.lastSequence, 1_000),
+          getRun(link.runId),
+        ]);
+        consecutiveReadFailures = 0;
+      } catch (error) {
+        // No new turn, no cursor advance, no tool replay. A daemon restart or
+        // SQLite lock is a transient observation failure, not a failed run.
+        consecutiveReadFailures++;
+        projection = {
+          ...projection,
+          status: `Reconnecting to resident runner (attempt ${consecutiveReadFailures}): ${String(error)}`,
+        };
+        callbacks.onProjection(projection);
+        await wait(Math.min(5_000, 250 * 2 ** Math.min(consecutiveReadFailures, 5)));
+        continue;
+      }
+      if (run === null) {
+        // A purged/missing run cannot be reconstructed from an old client
+        // cursor. Never treat this as a request to execute a new copy.
+        projection = {
+          ...projection,
+          terminal: true,
+          terminalStatus: "needs_reconciliation",
+          status: "Resident run unavailable after reconnect.",
+          error: "Run record is missing or outside retention; automatic recovery is impossible.",
+        };
+        callbacks.onProjection(projection);
+        return projection;
+      }
+      // The RunLedger status read and the events read happen concurrently.
+      // A new event may commit between them; when status claims there are
+      // unread events but the first read returned empty, read the page again
+      // before declaring corruption. Observing never resubmits a model call.
+      if (events.length === 0 && typeof run.lastSequence === "number" &&
+          run.lastSequence > link.lastSequence) {
+        try {
+          events = await loadRunEvents(link.runId, link.lastSequence, 1_000);
+        } catch (error) {
+          consecutiveReadFailures++;
+          projection = {
+            ...projection,
+            status: `Reconnecting to resident run events: ${String(error)}`,
+          };
+          callbacks.onProjection(projection);
+          await wait(Math.min(5_000, 250 * 2 ** Math.min(consecutiveReadFailures, 5)));
+          continue;
+        }
+      }
+      // Validate every envelope, not just the first in a page. Otherwise
+      // 1,2,4 silently concatenates fragments across a missing tool outcome.
+      let expectedSequence = link.lastSequence + 1;
+      for (const envelope of events) {
+        if (envelope.sequence === expectedSequence) {
+          expectedSequence++;
+          continue;
+        }
+        break;
+      }
+      if (events.length === 0 && typeof run.lastSequence === "number" &&
+          run.lastSequence > link.lastSequence ||
+          events.some((envelope, index) =>
+            envelope.sequence !== link.lastSequence + index + 1)) {
+        const firstGap = events.findIndex((envelope, index) =>
+          envelope.sequence !== link.lastSequence + index + 1);
+        const expected = firstGap < 0 ? link.lastSequence + 1
+          : link.lastSequence + firstGap + 1;
+        const received = firstGap < 0 ? "no events" : events[firstGap].sequence;
+        projection = {
+          ...projection,
+          terminal: true,
+          terminalStatus: "needs_reconciliation",
+          status: "Durable event history is incomplete.",
+          error: `Run event cursor gap: expected ${expected}, received ${received}. Review the run ledger; no tools were restarted.`,
+        };
+        callbacks.onProjection(projection);
+        return projection;
+      }
+      // A terminal run may have thousands of events while each page is capped
+      // at 1000. Terminal metadata is NOT evidence that the observer has
+      // consumed the whole journal: finalizing now would truncate the answer
+      // and discard the only replay cursor. Keep paging until caught up.
+      const pageEnd = events.length > 0
+        ? events[events.length - 1].sequence : link.lastSequence;
+      const caughtUp = typeof run.lastSequence !== "number" ||
+        pageEnd >= run.lastSequence;
+      const observableRun = caughtUp ? run : { ...run, status: "running" as const };
+      projection = projectDaemonTurnEvents(projection, events, observableRun);
       link = { ...link, lastSequence: projection.lastSequence, output: projection.output };
       saveActiveDaemonTurn(link);
       callbacks.onLinkChanged?.(link);
@@ -779,6 +912,7 @@ export async function watchDaemonDesktopTurn(
         }
         return projection;
       }
+      if (!caughtUp) continue; // Drain the rest of the durable page immediately.
       // A queued run says "Queued in the resident runner…" and nothing else,
       // which is the same sentence whether it is next in line or waiting for
       // 13 GiB that will not appear. The daemon already writes down why it held
@@ -801,7 +935,7 @@ export async function watchDaemonDesktopTurn(
       await wait(POLL_INTERVAL_MS);
     }
   } finally {
-    signal.removeEventListener("abort", requestCancel);
+    if (cancelOnAbort) signal.removeEventListener("abort", requestCancel);
   }
 }
 

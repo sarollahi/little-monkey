@@ -308,9 +308,26 @@ async function stageSourceAsset() {
       `stable-diffusion.cpp source checkout mismatch: expected ${asset.sourceCommit}, got ${checkedOut}`,
     );
   }
+  // Upstream's recursive submodules include deeply nested paths (for example
+  // CUTLASS example sources) that exceed MAX_PATH once they sit under the
+  // runner's temp directory. Without core.longpaths, Git for Windows refuses
+  // to create them ("Filename too long") and the Windows source build never
+  // starts. Passing it with -c also reaches the nested submodule clones, which
+  // do not inherit the superproject's local config. Other platforms ignore it.
   execFileSync(
     "git",
-    ["-C", sourceRoot, "submodule", "update", "--init", "--recursive", "--depth", "1"],
+    [
+      "-c",
+      "core.longpaths=true",
+      "-C",
+      sourceRoot,
+      "submodule",
+      "update",
+      "--init",
+      "--recursive",
+      "--depth",
+      "1",
+    ],
     { stdio: "inherit" },
   );
 

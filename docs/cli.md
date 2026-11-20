@@ -162,7 +162,10 @@ monkey voice route stop <session-id> [--json]
 monkey daemon install | status [--json]
 monkey daemon ensure [--json]
 monkey daemon run <recipe> [--owned-worktree] [--json]
-monkey daemon attach <run-id> [--follow] [--json]
+monkey daemon attach <run-id> [--follow] [--after <sequence>] [--json]
+monkey daemon session <session-id> [--source desktop|voice] [--follow] [--after <sequence>] [--json]
+monkey ingress list --recoverable --json
+monkey ingress list --source desktop --account <session-id> --json
 monkey daemon pause|resume|cancel <run-id>
 monkey daemon retry <run-id> [--acknowledge-side-effects]
 monkey daemon kill-switch engage|release|status

@@ -398,12 +398,211 @@ describe("daemon desktop routing and event replay", () => {
     expect(mocks.daemonDecisions).not.toHaveBeenCalled();
   });
 
+  it("reconnects after a lost read without re-submitting or duplicating events", async () => {
+    mocks.loadRunEvents.mockRejectedValueOnce(new Error("daemon restarted"))
+      .mockResolvedValue([{ sequence: 9, event: {
+        type: "completed", payload: { summary: "existing result" },
+      } }] as RunEventEnvelopeWire[]);
+    mocks.getRun.mockResolvedValue({ status: "succeeded" } as RunRecord);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const statuses: string[] = [];
+    const result = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1, lastSequence: 8, output: "" },
+      new AbortController().signal,
+      { onProjection: p => statuses.push(p.status) },
+      false,
+    );
+    expect(statuses.some(s => s.includes("Reconnecting to resident runner"))).toBe(true);
+    expect(result).toMatchObject({ terminal: true, lastSequence: 9, summary: "existing result" });
+    expect(mocks.loadRunEvents).toHaveBeenCalledTimes(2);
+    expect(mocks.loadRunEvents).toHaveBeenCalledWith("r", 8, 1_000);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("refuses to fabricate a missing daemon run after reconnect", async () => {
+    mocks.getRun.mockResolvedValue(null);
+    mocks.loadRunEvents.mockResolvedValue([]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "missing", assistantIndex: 0,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      error: expect.stringContaining("automatic recovery is impossible"),
+    });
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("detects missing sequence numbers without combining partial model output", async () => {
+    mocks.getRun.mockResolvedValue({ status: "running" } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 12, event: { type: "model_delta",
+        payload: { channel: "assistant", text: "unsafe splice" } } },
+    ] as RunEventEnvelopeWire[]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 0,
+        lastSequence: 7, output: "prior" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection.terminalStatus).toBe("needs_reconciliation");
+    expect(projection.error).toContain("expected 8, received 12");
+    expect(projection.output).toBe("prior");
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("refuses an interior ledger hole even when the first event is contiguous", async () => {
+    mocks.getRun.mockResolvedValue({ status: "running", lastSequence: 3 } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 1, event: { type: "model_delta",
+        payload: { channel: "assistant", text: "partial" } } },
+      { sequence: 3, event: { type: "completed", payload: { summary: "lost seq two" } } },
+    ] as RunEventEnvelopeWire[]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      output: "", error: expect.stringContaining("expected 2, received 3"),
+    });
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("does not truncate a terminal answer at the first 1000-event page", async () => {
+    const firstPage = Array.from({ length: 1_000 }, (_, i) => ({
+      sequence: i + 1,
+      event: { type: "model_delta",
+        payload: { channel: "assistant", text: "x" } },
+    })) as RunEventEnvelopeWire[];
+    const finalPage = [
+      { sequence: 1_001, event: { type: "model_delta",
+        payload: { channel: "assistant", text: "FINAL" } } },
+      { sequence: 1_002, event: { type: "completed",
+        payload: { summary: "whole answer", result_artifact_ids: [] } } },
+    ] as RunEventEnvelopeWire[];
+    mocks.getRun.mockResolvedValue({
+      status: "succeeded", lastSequence: 1_002,
+    } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(finalPage);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const projections: DaemonTurnProjection[] = [];
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 0,
+        lastSequence: 0, output: "" },
+      new AbortController().signal,
+      { onProjection: p => projections.push(p) }, false,
+    );
+    expect(projection.output).toBe("x".repeat(1_000) + "FINAL");
+    expect(projection.terminalStatus).toBe("succeeded");
+    expect(projection.lastSequence).toBe(1_002);
+    expect(mocks.loadRunEvents).toHaveBeenNthCalledWith(2, "r", 1_000, 1_000);
+    expect(projections[0].terminal).toBe(false);
+    expect(projections[projections.length - 1]?.terminal).toBe(true);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
+  it("retries an empty event page when run metadata advanced concurrently", async () => {
+    mocks.getRun.mockResolvedValue({ status: "succeeded", lastSequence: 1 } as RunRecord);
+    mocks.loadRunEvents
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { sequence: 1, event: { type: "model_delta",
+          payload: { channel: "assistant", text: "from the journal" } } },
+      ] as RunEventEnvelopeWire[]);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "succeeded",
+      output: "from the journal", lastSequence: 1,
+    });
+    expect(mocks.loadRunEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed when the journal reports events but no records can be read", async () => {
+    mocks.getRun.mockResolvedValue({ status: "succeeded", lastSequence: 3 } as RunRecord);
+    mocks.loadRunEvents.mockResolvedValue([]);
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1,
+        lastSequence: 0, output: "" },
+      new AbortController().signal, { onProjection: () => undefined }, false,
+    );
+    expect(projection).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      error: expect.stringContaining("received no events"),
+    });
+    expect(mocks.loadRunEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders approval, pause and reconciliation from authoritative run state", () => {
+    const link = {
+      output: "", status: "running", terminal: false, terminalStatus: null,
+      error: null, summary: null, lastSequence: 0,
+    } as DaemonTurnProjection;
+    expect(projectDaemonTurnEvents(link, [], {
+      status: "waiting_for_permission",
+    } as RunRecord).status).toMatch(/approval/i);
+    expect(projectDaemonTurnEvents(link, [], {
+      status: "paused",
+    } as RunRecord).status).toMatch(/paused/i);
+    expect(projectDaemonTurnEvents(link, [], {
+      status: "needs_reconciliation",
+    } as RunRecord)).toMatchObject({
+      terminal: true, terminalStatus: "needs_reconciliation",
+      error: expect.stringContaining("ambiguous outcome"),
+    });
+  });
+
+  it("detaches a recovered observer without cancelling daemon-owned execution", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const projection = await watchDaemonDesktopTurn(
+      { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1, lastSequence: 0, output: "" },
+      controller.signal,
+      { onProjection: () => undefined },
+      false,
+    );
+    expect(projection.terminal).toBe(false);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+    expect(mocks.loadRunEvents).not.toHaveBeenCalled();
+  });
+
+  it("allows two read-only observers to replay the same run without reexecuting", async () => {
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 1, event: { type: "model_delta", payload: { channel: "assistant", text: "hello" } } },
+      { sequence: 2, event: { type: "completed", payload: { summary: "done" } } },
+    ] as RunEventEnvelopeWire[]);
+    mocks.getRun.mockResolvedValue({ status: "succeeded" } as RunRecord);
+    mocks.ingressTurnShow.mockResolvedValue(null);
+    const link = { sessionId: "s", turnId: "t", runId: "r", assistantIndex: 1, lastSequence: 0, output: "" };
+    const projections: DaemonTurnProjection[] = [];
+    const [one, two] = await Promise.all([
+      watchDaemonDesktopTurn(link, new AbortController().signal,
+        { onProjection: p => projections.push(p) }, false),
+      watchDaemonDesktopTurn(link, new AbortController().signal,
+        { onProjection: p => projections.push(p) }, false),
+    ]);
+    expect(one).toMatchObject({ terminal: true, output: "hello", lastSequence: 2 });
+    expect(two).toMatchObject({ terminal: true, output: "hello", lastSequence: 2 });
+    expect(projections).toHaveLength(2);
+    expect(mocks.daemonCancel).not.toHaveBeenCalled();
+  });
+
   it("routes an abort to daemon cancellation while still consuming the terminal ledger event", async () => {
     const cancelled = {
       sequence: 2,
       event: { type: "cancelled", payload: { reason: "Stopped from desktop chat" } },
     } as RunEventEnvelopeWire;
-    mocks.loadRunEvents.mockResolvedValue([cancelled]);
+    mocks.loadRunEvents.mockResolvedValue([
+      { sequence: 1, event: { type: "queued", payload: { queue: "fixture" } } },
+      cancelled,
+    ] as RunEventEnvelopeWire[]);
     mocks.getRun.mockResolvedValue({ status: "cancelled" } as RunRecord);
     const controller = new AbortController();
     controller.abort();

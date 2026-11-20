@@ -25,6 +25,7 @@ import type { UsageInfo } from "./usageStore";
 import type { WorkflowSpec } from "../lib/workflow";
 import { errorMessage } from "../lib/errors";
 import { fireObservedHooks } from "../lib/userHooks";
+import { isDaemonSessionDismissed, rememberDaemonSessionDismissal } from "../lib/daemonSessionDismissals";
 
 /** localStorage key sessions were persisted under BEFORE file-based
  * persistence existed — only read (once, then removed) to migrate old data.
@@ -56,6 +57,10 @@ export interface ChatSession {
   id: string;
   title: string;
   messages: ChatMessage[];
+  /** True only if daemon admission survived but the original desktop
+   * transcript was never persisted. This is an observation shell, not a
+   * runnable reconstruction of unknown prompts or permission policy. */
+  recoveryOnly?: boolean;
   createdAt: number;
   updatedAt: number;
   /** Shown pinned to the top of the sidebar, above "Recents". */
@@ -445,6 +450,10 @@ export interface SessionStore {
    * hasn't been sent to yet, replaces it rather than creating another one
    * alongside it — see the implementation for why. */
   newSession: () => void;
+  /** Create a read-only view for a real accepted daemon session whose
+   * local transcript was lost at crash time. Never reconstructs a prompt,
+   * workspace grant or model choice from current settings. */
+  recoverMissingDaemonSession: (sessionId: string) => boolean;
   /** Make `id` the active session (no-op if it doesn't exist). Clears the
    * target's `unread` flag, mirroring "opening it marks it read". */
   switchSession: (id: string) => void;
@@ -603,7 +612,7 @@ export interface SessionStore {
   /** Append a new message (user, assistant, or tool) to `sessionId`'s
    * transcript. No-ops if the session no longer exists (deleted while a
    * turn was still streaming into it) — as do all mutators below. */
-  addMessage: (sessionId: string, msg: ChatMessage) => void;
+  addMessage: (sessionId: string, msg: ChatMessage, transient?: boolean) => void;
   /**
    * Shallow-merge `patch` into the last message of `sessionId`'s
    * transcript. Used by the agent loop to stream assistant content/tool_calls
@@ -614,7 +623,7 @@ export interface SessionStore {
   /** Shallow-merge `patch` into the message at `index` of `sessionId`'s
    * transcript. Used by the checkpoint notice's Revert button to
    * mark itself reverted in place. No-ops if `index` is out of range. */
-  updateMessageAt: (sessionId: string, index: number, patch: Partial<ChatMessage>) => void;
+  updateMessageAt: (sessionId: string, index: number, patch: Partial<ChatMessage>, transient?: boolean) => void;
   /** Drops the last message of `sessionId`'s transcript. Used to
    * clean up an empty assistant placeholder left behind when the Stop
    * button cancels a turn before any content streamed in. No-ops if the
@@ -1455,6 +1464,7 @@ function normalizeSession(raw: Partial<ChatSession>, interruptRunning: boolean):
     id: raw.id as string,
     title: raw.title as string,
     messages,
+    recoveryOnly: raw.recoveryOnly === true,
     createdAt: raw.createdAt as number,
     updatedAt: raw.updatedAt as number,
     pinned: raw.pinned ?? false,
@@ -1946,6 +1956,31 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     });
   },
 
+  recoverMissingDaemonSession: (sessionId) => {
+    // This id came from accepted ingress, not from provider output. Reject
+    // malformed/massive ids before they enter the persisted session index.
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/.test(sessionId)) return false;
+    if (isDaemonSessionDismissed(sessionId)) return false;
+    if (get().sessions.some((session) => session.id === sessionId)) return true;
+    const shell: ChatSession = {
+      ...createSession(),
+      id: sessionId,
+      title: 'Recovered agent session',
+      recoveryOnly: true,
+      workspacePath: null,
+      modelTarget: null,
+      personaId: null,
+      unread: true,
+    };
+    set((state) => {
+      if (state.sessions.some((session) => session.id === sessionId)) return state;
+      const sessions = [...state.sessions, shell];
+      persist(sessions, state.activeSessionId, state.groups);
+      return { sessions };
+    });
+    return true;
+  },
+
   newSession: () => {
     const state = get();
     const active = state.sessions.find((s) => s.id === state.activeSessionId);
@@ -1961,6 +1996,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => {
       const sessions =
         active && active.messages.length === 0 && active.comparisonBranch === null && !active.crewRun
+          && !active.recoveryOnly
           ? s.sessions.map((sess) => (sess.id === active.id ? session : sess))
           : [...s.sessions, session];
       persist(sessions, session.id, s.groups);
@@ -1992,8 +2028,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   deleteSession: (id) => {
     // A real user action ends this session. Observe it once, outside Zustand's
     // pure state updater, and never run shell hooks from model-authored text.
-    if(get().sessions.some(session=>session.id===id))
+    if(get().sessions.some(session=>session.id===id)) {
+      rememberDaemonSessionDismissal(id);
       fireObservedHooks('SessionEnd',{session_id:id});
+    }
     set((state) => {
       const deleted = state.sessions.find((s) => s.id === id);
       let remaining = state.sessions.filter((s) => s.id !== id);
@@ -2662,7 +2700,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set({ renameRequestId: null });
   },
 
-  addMessage: (sessionId, msg) => {
+  addMessage: (sessionId, msg, transient = false) => {
     set((state) => {
       const target = state.sessions.find((s) => s.id === sessionId);
       if (!target) return state;
@@ -2688,7 +2726,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         session.id === sessionId ? { ...session, messages, title, updatedAt: now } : session
       );
 
-      persist(sessions, state.activeSessionId, state.groups);
+      if (!transient) persist(sessions, state.activeSessionId, state.groups);
       return withMirror(state, sessionId, { sessions }, messages);
     });
   },
@@ -2703,13 +2741,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     });
   },
 
-  updateMessageAt: (sessionId, index, patch) => {
+  updateMessageAt: (sessionId, index, patch, transient = false) => {
     set((state) => {
       const target = state.sessions.find((s) => s.id === sessionId);
       if (!target || index < 0 || index >= target.messages.length) {
         return state;
       }
-      return applyMessagePatch(state, sessionId, index, patch);
+      return applyMessagePatch(state, sessionId, index, patch, !transient);
     });
   },
 
@@ -2794,7 +2832,8 @@ function applyMessagePatch(
   state: SessionStore,
   sessionId: string,
   index: number,
-  patch: Partial<ChatMessage>
+  patch: Partial<ChatMessage>,
+  persistWrite = true,
 ): Partial<SessionStore> {
   const now = Date.now();
   let updatedMessages: ChatMessage[] = [];
@@ -2808,6 +2847,6 @@ function applyMessagePatch(
     return { ...session, messages, updatedAt: now };
   });
 
-  persist(sessions, state.activeSessionId, state.groups);
+  if (persistWrite) persist(sessions, state.activeSessionId, state.groups);
   return withMirror(state, sessionId, { sessions }, updatedMessages);
 }

@@ -216,6 +216,22 @@ pub enum DaemonCmd {
         run_id: String,
         #[arg(long)]
         follow: bool,
+        /// Last committed event sequence already seen by this observer.
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach to the latest accepted turn in a session (read-only).
+    /// An editor passes its own source-account id (editor:<id>).
+    Session {
+        session_id: String,
+        #[arg(long, default_value = "desktop")]
+        source: String,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
         #[arg(long)]
         json: bool,
     },
@@ -726,8 +742,14 @@ pub async fn run(cli: &crate::Cli, action: &DaemonCmd) -> Result<(), String> {
         DaemonCmd::Attach {
             run_id,
             follow,
+            after,
             json,
-        } => attach(run_id, *follow, *json).await,
+        } => attach(run_id, *follow, *json, *after).await,
+        DaemonCmd::Session { session_id, source, follow, after, json } => {
+            let paths = DaemonPaths::resolve()?;
+            let run_id = session_run(&paths, source, session_id)?;
+            attach(&run_id, *follow, *json, *after).await
+        },
         DaemonCmd::Pause { run_id } => pause(run_id),
         DaemonCmd::Resume { run_id } => resume(run_id),
         DaemonCmd::Cancel { run_id, reason } => cancel(run_id, reason.as_deref()),
@@ -2619,10 +2641,32 @@ fn parse_params(values: &[String]) -> Result<HashMap<String, String>, String> {
     Ok(out)
 }
 
-async fn attach(run_id: &str, follow: bool, json: bool) -> Result<(), String> {
+/// Resolve only a stored acceptance. A client never starts execution by observing.
+/// An accepted-but-not-queued row is not silently replaced with an older turn.
+fn session_run(paths: &DaemonPaths, source: &str, session_id: &str) -> Result<String, String> {
+    use little_monkey_lib::channels::ingress::ConversationSource;
+    if session_id.is_empty() || session_id.len() > 256 || session_id.contains('\0') {
+        return Err("Invalid session identifier".into());
+    }
+    let source = ConversationSource::parse(source)
+        .ok_or_else(|| format!("Unknown conversation source '{source}'"))?;
+    let store = DaemonStore::open(paths)?;
+    let turn = store.recent_ingress_turns_filtered(Some(source), Some(session_id), 1)?
+        .into_iter().next()
+        .ok_or_else(|| format!("No accepted turn for {source:?} session '{session_id}'"))?;
+    let job_id = turn.job_id.as_deref()
+        .ok_or_else(|| format!("Session turn '{}' is {}: awaiting durable admission/recovery",
+            turn.source_event_id, turn.state.as_str()))?;
+    store.get_job(job_id)?
+        .and_then(|job| job.run_id)
+        .ok_or_else(|| format!("Session turn '{}' has no attached run; reconciliation required",
+            turn.source_event_id))
+}
+
+async fn attach(run_id: &str, follow: bool, json: bool, after: u64) -> Result<(), String> {
     let paths = DaemonPaths::resolve()?;
     let shared = SharedLedger::open(&paths.ledger_db)?;
-    let mut sequence = 0;
+    let mut sequence = after;
     loop {
         let events = shared.events(run_id, sequence, 1000)?;
         for event in events {

@@ -47,6 +47,10 @@ export interface ChatMessage {
    * This metadata (not spoofable assistant text) is the idempotent replay key
    * after a crash between session persistence and native inbox ack. */
   peerMail?: { id: string; senderSessionId: string };
+  /** Persisted identity of the daemon-owned assistant turn. An observer may
+   * reuse this transcript row rather than append a second placeholder after
+   * a crash; these IDs never authorize execution. */
+  durableTurn?: { turnId: string; runId: string };
   /** Local-only provenance used to make realtime transcript/event replay
    * idempotent across reconnects. Never sent to a model provider. */
   realtime?: {
@@ -119,7 +123,7 @@ export function demoteInlineSystemMessages(
  * forwards `messages` as opaque JSON, so it can't do the filtering for us. */
 export function toWireMessages(messages: ChatMessage[]): ChatMessage[] {
   return demoteInlineSystemMessages(
-    messages.map(({ at: _at, chapter: _chapter, realtime: _realtime, peerMail: _peerMail, ...wire }) => wire),
+    messages.map(({ at: _at, chapter: _chapter, realtime: _realtime, peerMail: _peerMail, durableTurn: _durableTurn, ...wire }) => wire),
   );
 }
 

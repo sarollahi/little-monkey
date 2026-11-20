@@ -100,8 +100,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for cache in src-tauri/target/${{ matrix.target }}/debug/build/whisper-rs-sys-*/out/build/CMakeCache.txt; do
-            echo "$cache"
+          # Cargo may redirect build scripts to a nonhistorical output tree.
+          # Match actual CMake caches by Whisper's GGML_NATIVE option, and fail
+          # if none is found. A missing glob must never yield a green build.
+          matches=0
+          while IFS= read -r -d '' cache; do
+            if ! grep -q '^GGML_NATIVE:' "$cache"; then continue; fi
+            matches=$((matches + 1))
+            echo "Whisper CMake cache: $cache"
             grep -E '^(GGML_NATIVE|GGML_CPU_ARM_ARCH|GGML_AVX512|HAVE_[A-Z0-9_]+):' "$cache"
             grep -q '^GGML_NATIVE:BOOL=OFF' "$cache"
             if grep -qE '^(GGML_AVX512:BOOL=ON|HAVE_(SVE|MATMUL_INT8|SME):INTERNAL=1)' "$cache"; then
@@ -111,7 +117,12 @@ jobs:
             case '${{ matrix.target }}' in
               aarch64-*) grep -q '^HAVE_DOTPROD:INTERNAL=1' "$cache" ;;
             esac
-          done
+          done < <(find src-tauri/target -type f -name CMakeCache.txt -print0)
+          if [ "$matches" -eq 0 ]; then
+            echo "::error::No Whisper CMake cache found; CPU compatibility cannot be certified"
+            find src-tauri/target -type f -name CMakeCache.txt -print || true
+            exit 1
+          fi
 
   real-transcription:
     name: real WAV + browser WebM/Opus transcription

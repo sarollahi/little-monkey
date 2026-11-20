@@ -45,7 +45,7 @@ use crate::http_route_registry::{
 /// * **minor**: anything additive — a new route, method, tool, or optional
 ///   parameter.
 /// * **patch**: descriptions and other non-structural wording.
-pub const CONTRACT_VERSION: &str = "2.3.0";
+pub const CONTRACT_VERSION: &str = "2.4.0";
 
 /// How long a surface stays after it is announced deprecated.
 ///
@@ -251,6 +251,14 @@ pub const REMOTE_ROUTES: &[RemoteRouteSpec] = &[
         method: "GET",
         path: "/v1/remote/mobile/sessions",
         gate: RemoteGate::Capability("ViewSessions"),
+    },
+    RemoteRouteSpec {
+        plane: RemotePlane::Mobile,
+        method: "GET",
+        path: "/v1/remote/mobile/sessions/{session_id}/agent-turns",
+        // First grant checked by the route is ViewRuns; the handler additionally
+        // requires ViewSessions and ViewEvents, then validates the run scope.
+        gate: RemoteGate::Action("ViewRuns"),
     },
     RemoteRouteSpec {
         plane: RemotePlane::Mobile,

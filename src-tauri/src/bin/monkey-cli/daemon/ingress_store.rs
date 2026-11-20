@@ -312,23 +312,113 @@ impl DaemonStore {
         }))
     }
 
-    /// Recent turns across every origin, newest first. The read model behind
-    /// the typed bridge: identifiers and status, never message text.
-    pub fn recent_ingress_turns(&self, limit: u32) -> Result<Vec<StoredIngressTurn>, String> {
-        let mut statement = self
-            .connection
-            .prepare(&format!(
-                "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns
-                 ORDER BY created_at_ms DESC LIMIT ?1"
-            ))
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([i64::from(limit)], read_ingress_turn)
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
+    /// Recent accepted turns, filtered in SQLite before applying the limit.
+    /// A local observer can resolve its session even when unrelated devices
+    /// produced more than a page of newer turns. This is a read-only view of
+    /// the existing admission records; it never acquires execution authority.
+    pub fn recent_ingress_turns_filtered(
+        &self,
+        source: Option<ConversationSource>,
+        account: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredIngressTurn>, String> {
+        // Build only WHERE clauses actually supplied. The earlier nullable
+        // predicate form ("? IS NULL OR source=?") was logically correct but
+        // prevented SQLite from using the v21 (source, account, time) index.
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        let mut predicates = Vec::new();
+        if let Some(source) = source {
+            values.push(rusqlite::types::Value::Text(source.as_str().into()));
+            predicates.push(format!("source=?{}", values.len()));
+        }
+        if let Some(account) = account {
+            values.push(rusqlite::types::Value::Text(account.into()));
+            predicates.push(format!("source_account_id=?{}", values.len()));
+        }
+        values.push(rusqlite::types::Value::Integer(i64::from(limit.clamp(1, 200))));
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", predicates.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns {where_clause}
+             ORDER BY created_at_ms DESC, ingress_id DESC LIMIT ?{}",
+            values.len(),
+        );
+        let mut statement = self.connection.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(values.iter()), read_ingress_turn,
+        ).map_err(|error| error.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .collect()
+            .collect::<Result<Vec<_>, String>>()
+    }
+
+    /// In-flight desktop sessions in the existing admission and job tables.
+    /// Recovery consumes this read model; it never submits, retries, or takes
+    /// over a run. A terminal reconciliation row remains visible to observers.
+    pub fn recoverable_desktop_turns(&self, limit: u32) -> Result<Vec<StoredIngressTurn>, String> {
+        // A daemon may finish between the desktop crash and its next start.
+        // Recent terminal runs must remain discoverable, or the final answer
+        // can never be reconstructed even though its run ledger is intact.
+        // Older completed history remains available through explicit queries.
+        const RECENT_TERMINAL_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis()
+            .try_into()
+            .unwrap_or(i64::MAX);
+        self.recoverable_desktop_turns_since(limit, now_ms.saturating_sub(RECENT_TERMINAL_MS))
+    }
+
+    fn recoverable_desktop_turns_since(
+        &self,
+        limit: u32,
+        terminal_since_ms: i64,
+    ) -> Result<Vec<StoredIngressTurn>, String> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {INGRESS_TURN_COLUMNS} FROM ingress_turns
+             WHERE source IN ('desktop','voice') AND (
+               state='accepted' OR
+               (state='queued' AND (
+                 job_id IN (
+                   SELECT job_id FROM daemon_jobs WHERE state IN
+                   ('preparing','queued','running','waiting_approval','paused',
+                    'cancelling','needs_reconciliation')
+                 ) OR (
+                   job_id IN (
+                     SELECT job_id FROM daemon_jobs WHERE state IN
+                     ('succeeded','failed','cancelled') AND updated_at_ms >= ?2
+                   )
+                 )
+               ))
+             )
+             ORDER BY
+               CASE WHEN state='accepted' OR job_id IN (
+                 SELECT job_id FROM daemon_jobs WHERE state IN
+                 ('preparing','queued','running','waiting_approval','paused',
+                  'cancelling','needs_reconciliation')
+               ) THEN 0 ELSE 1 END,
+               COALESCE((SELECT updated_at_ms FROM daemon_jobs
+                         WHERE job_id=ingress_turns.job_id), created_at_ms) DESC,
+               ingress_id DESC LIMIT ?1"
+        )).map_err(|error| error.to_string())?;
+        let rows = statement.query_map(
+            rusqlite::params![i64::from(limit.clamp(1, 2000)), terminal_since_ms],
+            read_ingress_turn,
+        ).map_err(|error| error.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .collect::<Result<Vec<_>, String>>()
+    }
+
+    /// Recent turns across every origin, newest first. No message text.
+    pub fn recent_ingress_turns(&self, limit: u32) -> Result<Vec<StoredIngressTurn>, String> {
+        self.recent_ingress_turns_filtered(None, None, limit)
     }
 
     /// Whether the frozen route that produced a job said its run may answer
@@ -671,6 +761,117 @@ mod tests {
             RouteTarget::new("chat"),
             NOW,
         )
+    }
+
+    #[test]
+    fn recovery_read_model_includes_only_live_desktop_and_reconciliation() {
+        let mut store = DaemonStore::open_in_memory().unwrap();
+        store.accept_ingress_turn(&ingress(ConversationSource::Desktop,"d1"),&[],NOW).unwrap();
+        store.accept_ingress_turn(&ingress(ConversationSource::Voice,"v1"),&[],NOW+1).unwrap();
+        store.accept_ingress_turn(&ingress(ConversationSource::Mobile,"m1"),&[],NOW+2).unwrap();
+        let turns=store.recoverable_desktop_turns(10).unwrap();
+        assert_eq!(turns.len(),2);
+        assert_eq!(turns[0].source_event_id,"v1");
+        assert_eq!(turns[1].source_event_id,"d1");
+        // This is an observer query: it cannot transition a stored turn.
+        assert_eq!(store.pending_ingress_turns(10).unwrap().len(),3);
+    }
+
+    #[test]
+    fn recovery_ignores_terminal_jobs_but_preserves_reconciliation() {
+        let mut store=DaemonStore::open_in_memory().unwrap();
+        let IngressAcceptance::Accepted{ingress_id} = store
+            .accept_ingress_turn(&ingress(ConversationSource::Desktop,"terminal"),&[],NOW).unwrap()
+        else { panic!("new ingress"); };
+        // The job is only an existing daemon job: no executor is involved in
+        // this observation test, and no run is submitted by discovery.
+        let job=super::super::store::NewDaemonJob {
+            job_id:"job-terminal".into(),
+            recipe_snapshot:"/tmp/immutable-recipe.json".into(),
+            priority:0,max_attempts:1,created_at_ms:NOW as u64,
+            max_runtime_ms:60000,max_memory_bytes:None,max_log_bytes:1024,
+            repository_policy_json:None,worktree_json:None,parent_run_id:None,
+        };
+        store.insert_preparing(&job, 128).unwrap();
+        store.mark_ingress_queued(&ingress_id,&job.job_id,NOW+1).unwrap();
+        store.connection.execute(
+            "UPDATE daemon_jobs SET state='succeeded' WHERE job_id=?1",
+            [&job.job_id],
+        ).unwrap();
+        // Historical rows outside the bounded terminal window are excluded
+        // from automated startup replay but remain in the immutable ledger.
+        assert!(store.recoverable_desktop_turns_since(10, NOW + 1).unwrap().is_empty());
+        let historical = store.recoverable_desktop_turns_since(10, NOW - 1).unwrap();
+        assert_eq!(historical.len(), 1);
+        assert_eq!(historical[0].source_event_id, "terminal");
+        store.connection.execute(
+            "UPDATE daemon_jobs SET state='needs_reconciliation' WHERE job_id=?1",
+            [&job.job_id],
+        ).unwrap();
+        let recovered=store.recoverable_desktop_turns_since(10, NOW + 1).unwrap();
+        assert_eq!(recovered.len(),1);
+        assert_eq!(recovered[0].source_event_id,"terminal");
+    }
+
+    #[test]
+    fn long_running_job_finished_recently_is_recovered_even_if_admission_is_old() {
+        let mut store = DaemonStore::open_in_memory().unwrap();
+        const EIGHT_DAYS: i64 = 8 * 24 * 60 * 60 * 1_000;
+        const SEVEN_DAYS: i64 = 7 * 24 * 60 * 60 * 1_000;
+        let old = ConversationIngress::direct(
+            ConversationSource::Desktop, "acct-1", "long-running",
+            "session-1", "ship it", RouteTarget::new("chat"),
+            NOW - EIGHT_DAYS,
+        );
+        let IngressAcceptance::Accepted { ingress_id } = store
+            .accept_ingress_turn(&old, &[], NOW - EIGHT_DAYS).unwrap()
+        else { panic!("expected a newly accepted turn"); };
+        let job = super::super::store::NewDaemonJob {
+            job_id: "job-recent-finish".into(),
+            recipe_snapshot: "/tmp/immutable-recipe.json".into(),
+            priority: 0, max_attempts: 1,
+            created_at_ms: (NOW - EIGHT_DAYS) as u64,
+            max_runtime_ms: 60_000, max_memory_bytes: None,
+            max_log_bytes: 1_024, repository_policy_json: None,
+            worktree_json: None, parent_run_id: None,
+        };
+        store.insert_preparing(&job, 128).unwrap();
+        store.mark_ingress_queued(&ingress_id, &job.job_id, NOW - EIGHT_DAYS + 1).unwrap();
+        store.connection.execute(
+            "UPDATE daemon_jobs SET state='succeeded', updated_at_ms=?1 WHERE job_id=?2",
+            rusqlite::params![NOW, &job.job_id],
+        ).unwrap();
+        let recovered = store
+            .recoverable_desktop_turns_since(10, NOW - SEVEN_DAYS).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].source_event_id, "long-running");
+    }
+
+    #[test]
+    fn session_scoped_attachment_filters_before_limiting() {
+        let mut store = DaemonStore::open_in_memory().expect("open");
+        store.accept_ingress_turn(
+            &ingress(ConversationSource::Desktop, "original"), &[], NOW
+        ).expect("original accepted");
+        // Later traffic from other clients must not evict this session from
+        // the page of one row that the desktop recovery request asks for.
+        for n in 0..210 {
+            let mut other = ingress(ConversationSource::Desktop, &format!("other-{n}"));
+            other.source_account_id = "another-session".into();
+            store.accept_ingress_turn(&other, &[], NOW + 1 + n)
+                .expect("other accepted");
+        }
+        let own = store.recent_ingress_turns_filtered(
+            Some(ConversationSource::Desktop), Some("acct-1"), 1
+        ).expect("scoped read");
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].source_event_id, "original");
+        assert!(store.recent_ingress_turns_filtered(
+            Some(ConversationSource::Voice), Some("acct-1"), 1
+        ).unwrap().is_empty());
+        assert!(store.recent_ingress_turns_filtered(
+            Some(ConversationSource::Desktop), Some("another-session"), 1
+        ).unwrap().len() == 1);
     }
 
     #[test]

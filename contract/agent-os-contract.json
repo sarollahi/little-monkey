@@ -1,5 +1,5 @@
 {
-  "contract_version": "2.3.0",
+  "contract_version": "2.4.0",
   "support_window_days": 180,
   "http_routes": [
     {
@@ -419,6 +419,12 @@
       "method": "GET",
       "path": "/v1/remote/mobile/sessions",
       "gate": "capability:ViewSessions"
+    },
+    {
+      "plane": "mobile",
+      "method": "GET",
+      "path": "/v1/remote/mobile/sessions/{session_id}/agent-turns",
+      "gate": "action:ViewRuns"
     },
     {
       "plane": "mobile",

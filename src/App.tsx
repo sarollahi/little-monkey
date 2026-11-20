@@ -62,7 +62,6 @@ import {
   deliverProcessSignal,
   sweepPendingProcessSignals,
 } from "./lib/processSignalDelivery";
-import { recoverDaemonDesktopTurns } from "./lib/agentLoop";
 import { paletteClient } from "./lib/paletteClient";
 import { featurePanelReducer, type FeaturePanelId } from "./lib/appShellPanels";
 import { studioClient } from "./lib/studioClient";
@@ -919,13 +918,23 @@ function App() {
     };
   }, []);
 
-  // Rebind persisted chat placeholders to the daemon's shared run ledger
-  // after a WebView/app restart. Only the main window owns recovery so two
-  // session windows never race to render the same durable event stream.
+  // Each window may observe an existing daemon-owned turn. Recovery is now
+  // read-only and the daemon alone owns execution, so a secondary session
+  // window cannot start a duplicate tool merely by attaching to the ledger.
+  // Loaded on demand so the startup entry chunk does not carry the poller.
   useEffect(() => {
-    if (isTauri() && getCurrentWindow().label === "main") {
-      recoverDaemonDesktopTurns();
-    }
+    if (!isTauri()) return;
+    let disposed = false;
+    let dispose: (() => void) | undefined;
+    void import("./lib/daemonTurnRecovery")
+      .then(({ recoverDaemonDesktopTurns }) => {
+        if (!disposed) dispose = recoverDaemonDesktopTurns();
+      })
+      .catch((error) => console.warn("Durable session recovery failed to load:", error));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
   }, []);
 
   // Local App Builder (ROADMAP.md, Phase 3): a published app's static page

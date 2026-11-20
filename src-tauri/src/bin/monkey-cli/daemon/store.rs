@@ -2523,6 +2523,16 @@ CREATE INDEX IF NOT EXISTS channel_outbound_echo_age_idx
     ON channel_outbound_echo(account_id, sent_at_ms DESC);
 "#;
 
+// Session attachment reads the same accepted-turn rows that own durable
+// admission. The index makes an exact source+session lookup independent of
+// traffic from other clients; no second session table is introduced.
+const DAEMON_V21: i64 = 21;
+const DAEMON_V21_CHECKSUM: &str = "daemon-v21-session-scoped-ingress-index-2026-11-15";
+const DAEMON_V21_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS ingress_turns_session_attachment_idx
+ON ingress_turns(source, source_account_id, created_at_ms DESC, ingress_id DESC);
+"#;
+
 /// Every migration in order, so applying them is a loop rather than a stanza per
 /// version. Mirrors the shape `denial_sink` and the run ledger already use, and
 /// pays off the debt `DaemonEngine::recover`'s comment flagged: before this,
@@ -2554,12 +2564,13 @@ const DAEMON_MIGRATIONS: &[(i64, &str, &str)] = &[
     (DAEMON_V18, DAEMON_V18_CHECKSUM, DAEMON_V18_SQL),
     (DAEMON_V19, DAEMON_V19_CHECKSUM, DAEMON_V19_SQL),
     (DAEMON_V20, DAEMON_V20_CHECKSUM, DAEMON_V20_SQL),
+    (DAEMON_V21, DAEMON_V21_CHECKSUM, DAEMON_V21_SQL),
 ];
 
 /// Latest version this build understands. The forward-only guard compares
 /// against this rather than a specific version, so adding V4 needs no edit
 /// there.
-const DAEMON_LATEST: i64 = DAEMON_V20;
+const DAEMON_LATEST: i64 = DAEMON_V21;
 
 /// Active states, spelled once. A reservation is held for exactly as long as the
 /// job is in one of them, which is what releases it on any exit path — clean,
@@ -2656,6 +2667,55 @@ mod tests {
         assert!(store.committed_reservations().unwrap().is_empty());
     }
 
+    /// V21 adds an index, not a second session store. An old accepted turn
+    /// and its immutable identity must survive migration without modification.
+    #[test]
+    fn durable_session_lookup_upgrades_a_v20_queue_in_place() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE daemon_migrations (
+                version INTEGER PRIMARY KEY,
+                checksum TEXT NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+             ) STRICT;"
+        ).unwrap();
+        for &(version, checksum, sql) in DAEMON_MIGRATIONS {
+            if version > DAEMON_V20 { break; }
+            connection.execute_batch(sql).unwrap();
+            connection.execute(
+                "INSERT INTO daemon_migrations(version,checksum,applied_at_ms)
+                 VALUES(?1,?2,1)",
+                rusqlite::params![version, checksum],
+            ).unwrap();
+        }
+        connection.execute_batch(
+            "INSERT INTO ingress_turns (
+                 ingress_id,dedupe_key,source,source_account_id,source_event_id,
+                 session_key,state,ingress_json,params_json,attempts,
+                 created_at_ms,updated_at_ms
+             ) VALUES (
+                 'saved','desktop:session-a:turn-a','desktop','session-a','turn-a',
+                 'desktop:session-a','accepted','{}','[]',0,100,100
+             );"
+        ).unwrap();
+        apply_daemon_migrations(&connection).unwrap();
+        let index: String = connection.query_row(
+            "SELECT name FROM sqlite_master WHERE type='index'
+             AND name='ingress_turns_session_attachment_idx'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(index, "ingress_turns_session_attachment_idx");
+        let store = DaemonStore { connection };
+        let rows = store.recent_ingress_turns_filtered(
+            Some(little_monkey_lib::channels::ingress::ConversationSource::Desktop),
+            Some("session-a"), 10,
+        ).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_event_id, "turn-a");
+        assert_eq!(rows[0].state, crate::daemon::ingress_store::IngressState::Accepted);
+        assert_eq!(rows[0].execution_version, None);
+    }
+
     /// Peer provenance arrives on a database that is already at V17 — the
     /// telephony shape, which is what a live installation is sitting on.
     ///
@@ -2734,8 +2794,15 @@ mod tests {
                     0
                 ))
                 .unwrap(),
-            DAEMON_V20
+            DAEMON_LATEST
         );
+        // V21's session-attachment index is present after the older schema
+        // migrates; current-version assertions must not lag new migrations.
+        let index_exists: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='ingress_turns_session_attachment_idx'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(index_exists, 1);
         // V20's ledger exists and is empty. Empty is the correct starting
         // state and not a vacuous assertion: the alternative a migration could
         // have taken — back-filling it from the outbound event log — would

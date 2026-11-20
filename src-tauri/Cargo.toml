@@ -128,7 +128,7 @@ async-trait = "0.1.89"
 # 8414 discovery, RFC 7591 dynamic client registration, PKCE authorization
 # code flow, token refresh) used by `mcp_oauth.rs`. See that module's doc
 # comment for how it composes with the existing manual-bearer-token path.
-rmcp = { version = "2.2.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"] }
+rmcp = { version = "3.11.0", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"] }
 # Only needed by the `mcp_test_server` bin (src/bin/mcp_test_server.rs), a
 # trivial stdio MCP server used solely by mcp.rs's unit tests — its
 # `#[tool_router]`-annotated methods need `JsonSchema` derives, and that
@@ -312,14 +312,14 @@ system-memory = "0.1.7"
 # backup/restore. Bundling avoids depending on whatever SQLite version happens
 # to be installed on a user's machine; backup/limits support bounded portable
 # snapshots and hostile-input guardrails.
-# Held at 0.40.2 by `matrix-sdk-sqlite` 0.19.1, not by anything in this tree.
-# `libsqlite3-sys` declares `links = "sqlite3"`, so exactly one version of it
-# may exist in a binary: the Matrix crypto store's rusqlite and ours have to
-# be the same. Bumping this without upstream bumping theirs fails at
-# resolution, loudly, which is the failure mode we want. When
-# `matrix-sdk-sqlite` moves to a newer rusqlite, move with it — nothing here
-# depends on 0.40.2 specifically.
-rusqlite = { version = "0.40.2", features = ["bundled", "backup", "limits"] }
+# 0.41 is the first line whose bundled SQLite (`libsqlite3-sys` 0.39) carries
+# the fix for RUSTSEC-2026-0459. `libsqlite3-sys` declares
+# `links = "sqlite3"`, so exactly one version of it may exist in a binary: the
+# Matrix crypto store's rusqlite and ours have to be the same. Upstream
+# `matrix-sdk-sqlite` 0.19.1 still requires `^0.40.2`, so it is patched to
+# 0.41 below (see vendor/matrix-sdk-sqlite/LITTLE_MONKEY_PATCH.md). When
+# upstream moves to a fixed rusqlite, drop the patch and move with it.
+rusqlite = { version = "0.41.1", features = ["bundled", "backup", "limits"] }
 # terminal.rs: one cross-platform pseudoterminal implementation for the
 # in-app terminal. The frontend intentionally stays a thin line-oriented
 # terminal surface; process ownership, output bounds, cancellation, and
@@ -337,8 +337,9 @@ enigo = "0.6.1"
 # every restart would register a new device against the user's account.
 #
 # Two known costs, both compile-time loud: the SDK's `matrix-sdk-sqlite` is
-# what holds `rusqlite` at 0.40.2 above, and `matrix-sdk-base` pulls `decancer`,
-# whose `impl Add<_> for String` makes `String + &String` ambiguous tree-wide
+# what decides the `rusqlite` line above (patched to 0.41 for
+# RUSTSEC-2026-0459), and `matrix-sdk-base` pulls `decancer`, whose
+# `impl Add<_> for String` makes `String + &String` ambiguous tree-wide
 # (write `format!` instead). Its HTTP is this tree's own `egress::hardened()`
 # client, handed to `ClientBuilder::http_client`, so no Matrix request escapes
 # the egress guard.
@@ -354,8 +355,8 @@ mime = "0.3"
 # Executable extensions are WebAssembly components only. Keep Wasmtime's
 # optional surface narrow: no cache/profiling/debug-server/native plugin path,
 # and Preview 2 is the sole WASI ABI linked into extension stores.
-wasmtime = { version = "=48.0.7", default-features = false, features = ["async", "cranelift", "component-model", "runtime", "std"] }
-wasmtime-wasi = { version = "=48.0.7", default-features = false, features = ["p2"] }
+wasmtime = { version = "=48.0.10", default-features = false, features = ["async", "cranelift", "component-model", "runtime", "std"] }
+wasmtime-wasi = { version = "=48.0.10", default-features = false, features = ["p2"] }
 
 # model_sources.rs: advisory cross-process install locks on macOS/Linux keep
 # desktop and CLI pulls from mutating the same resumable partial download.
@@ -452,3 +453,7 @@ wat = "1"
 # Keep upstream's API/FFI intact while authenticating every native runtime
 # archive before extraction. See vendor/sherpa-onnx-sys/build.rs.
 sherpa-onnx-sys = { path = "../vendor/sherpa-onnx-sys" }
+# Upstream 0.19.1 with only its rusqlite requirement raised from ^0.40.2 to
+# ^0.41.1, so the bundled SQLite is the one that fixes RUSTSEC-2026-0459.
+# See vendor/matrix-sdk-sqlite/LITTLE_MONKEY_PATCH.md.
+matrix-sdk-sqlite = { path = "../vendor/matrix-sdk-sqlite" }

@@ -404,3 +404,77 @@ describe("hydrateSessions attachedStackIds default", () => {
     ]);
   });
 });
+
+describe("read-only shell for a daemon turn whose first desktop save was lost", () => {
+  it("recreates one stable identity without borrowing the current workspace or persona", async () => {
+    seed();
+    const store = useSessionStore.getState();
+    expect(store.recoverMissingDaemonSession("crashed-session-1")).toBe(true);
+    expect(store.recoverMissingDaemonSession("crashed-session-1")).toBe(true);
+    const recovered = useSessionStore.getState().sessions.filter(
+      s => s.id === "crashed-session-1"
+    );
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      recoveryOnly: true,
+      workspacePath: null,
+      modelTarget: null,
+      personaId: null,
+      messages: [],
+    });
+    expect(useSessionStore.getState().activeSessionId).toBe("a");
+    expect(useSessionStore.getState().recoverMissingDaemonSession("../invalid")).toBe(false);
+
+    // Its incomplete state survives the same JSON normalization as all
+    // regular session records, including a cold app restart.
+    const snapshot = JSON.stringify({
+      sessions: useSessionStore.getState().sessions,
+      activeSessionId: "a",
+      groups: [],
+    });
+    invokeMock.mockImplementation(async (command: unknown) =>
+      command === "sessions_load" ? snapshot : null
+    );
+    await hydrateSessions();
+    expect(useSessionStore.getState().sessions.find(
+      s => s.id === "crashed-session-1"
+    )?.recoveryOnly).toBe(true);
+  });
+});
+
+describe("watcher-only session transcript updates", () => {
+  it("renders and patches transient observation rows without a disk write", () => {
+    seed();
+    useSessionStore.getState().addMessage("a", {
+      role: "assistant", content: "observing",
+      durableTurn: { turnId: "t", runId: "r" },
+    }, true);
+    useSessionStore.getState().updateMessageAt("a", 0, {
+      content: "observed result",
+    }, true);
+    expect(useSessionStore.getState().sessions.find(s => s.id === "a")?.messages[0].content)
+      .toBe("observed result");
+    expect(invokeMock).not.toHaveBeenCalledWith("sessions_save", expect.anything());
+  });
+
+  it("does not discard an empty recovery-only shell when New Session is clicked", () => {
+    seed();
+    expect(useSessionStore.getState().recoverMissingDaemonSession("recovery-1")).toBe(true);
+    useSessionStore.getState().switchSession("recovery-1");
+    useSessionStore.getState().newSession();
+    expect(useSessionStore.getState().sessions.some(
+      s => s.id === "recovery-1" && s.recoveryOnly,
+    )).toBe(true);
+  });
+});
+
+describe("explicit deletion prevents daemon recovery from resurrecting a chat", () => {
+  it("does not recreate an intentionally deleted session even if daemon ingress remains", () => {
+    const id = "deleted-daemon-session-20261116";
+    seed(makeSession(id));
+    useSessionStore.getState().deleteSession(id);
+    expect(useSessionStore.getState().sessions.some(s => s.id === id)).toBe(false);
+    expect(useSessionStore.getState().recoverMissingDaemonSession(id)).toBe(false);
+    expect(useSessionStore.getState().sessions.some(s => s.id === id)).toBe(false);
+  });
+});
