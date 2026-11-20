@@ -500,7 +500,7 @@ describe("daemon desktop routing and event replay", () => {
     expect(projection.lastSequence).toBe(1_002);
     expect(mocks.loadRunEvents).toHaveBeenNthCalledWith(2, "r", 1_000, 1_000);
     expect(projections[0].terminal).toBe(false);
-    expect(projections.at(-1)?.terminal).toBe(true);
+    expect(projections[projections.length - 1]?.terminal).toBe(true);
     expect(mocks.daemonCancel).not.toHaveBeenCalled();
   });
 
