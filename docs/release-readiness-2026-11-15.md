@@ -24,13 +24,15 @@ nested TAP tests, the browser's unbounded CDP/cleanup behavior, and macOS
 Bash 3.2 lacking `mapfile` in Whisper CPU-baseline verification. Fixes
 are committed, but outcomes on the latest head are **pending**.
 
-A completed [RustSec preview](https://github.com/sarollahi/little-monkey/actions/runs/43827611219)
-reduced the actual audit from 13 findings to three after compatible
-Quinn/vodozemac/Wasmtime updates in a disposable checkout. The exact
-compatible patches were committed to this PR; see
-[security blockers](security-release-blockers-2026-11-15.md).
-The remaining SQLite and MCP advisories are release blockers until
-resolved and tested, regardless of whether the package lifecycle passes.
+All RustSec vulnerabilities reported against the lockfile (21 by
+2026-11-19, up from 13 on 2026-11-15) are now remediated by real dependency
+upgrades: Wasmtime/WASI 48.0.10, Quinn, vodozemac, the rmcp 3.11 MCP SDK
+migration and the SQLite fix through `rusqlite` 0.41 with a one-line
+vendored `matrix-sdk-sqlite` requirement patch. `cargo audit` reports zero
+vulnerabilities; nothing is ignored. See the
+[security register](security-release-blockers-2026-11-15.md). The upgraded
+dependencies still have to pass the full cross-platform matrices on the
+final head before a release.
 The latest PR also adds detached-GPG verification for the downloaded
 previous release; **that added check has not passed CI yet.**
 

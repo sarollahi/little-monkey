@@ -88,20 +88,20 @@ in-app updater. Subsequent commits introduce the previous release's detached
 GPG verification and patched Rust dependencies, so the latest candidate
 must pass again before publication.
 
-The [RustSec remediation preview](https://github.com/sarollahi/little-monkey/actions/runs/43827611219)
-measured three remaining findings after applying compatible dependency
-patches. Those updates are now in the draft PR but are not yet confirmed
-passing on the latest Rust/native/installer matrices.
+Every RustSec vulnerability in the lockfile is now remediated by dependency
+upgrades (see [Security register](security-release-blockers-2026-11-15.md));
+`cargo audit` reports zero vulnerabilities. The upgraded dependencies must
+still pass the latest Rust/native/installer matrices before publication.
 
 ## Available execution paths
 
 An earlier real CI run for commit `440a1969` on November 15, 2026 found
 failing source-level acceptance checks (canonical link scan, Rust daemon
 CLI location), a candidate Debian bundle signing failure, and 13 current
-RustSec vulnerabilities. Later commits address the first three findings,
-but **the updated workflows must complete successfully before accepting
-these fixes**. The vulnerability register and required upgrade work are
-in [Security blockers](security-release-blockers-2026-11-15.md).
+RustSec vulnerabilities. Later commits address all four, but **the updated
+workflows must complete successfully before accepting these fixes**. The
+vulnerability register and the upgrades that resolved it are in
+[Security register](security-release-blockers-2026-11-15.md).
 
 The Linux candidate workflow now uses a **next-patch, unpublished test
 version** across Tauri, Cargo, lockfile and the CLI, so its selected older
