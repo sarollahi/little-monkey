@@ -14,7 +14,7 @@
 //! Flow, driven by [`mcp_oauth_connect`]:
 //! 1. `AuthorizationManager::new(base_url)` — the MCP server's own HTTP(S)
 //!    URL doubles as the OAuth resource/issuer base for discovery.
-//! 2. `discover_metadata()` (RFC 8414, with an RFC 9728 protected-resource
+//! 2. `resolve_metadata()` (RFC 8414, with an RFC 9728 protected-resource
 //!    metadata attempt first, and a same-origin-derived legacy fallback if
 //!    the server advertises neither — all handled inside `rmcp` itself).
 //! 3. [`LoopbackListener::bind_for`] — reserves the server's stable loopback
@@ -749,7 +749,11 @@ pub(crate) async fn prepare_authorization(
     redirect_uri: &str,
     manual_client: Option<&ManualClientRegistration>,
 ) -> Result<PreparedAuthorization, String> {
-    let metadata = manager.discover_metadata().await.map_err(auth_err)?;
+    let metadata = manager
+        .resolve_metadata()
+        .await
+        .map_err(auth_err)?
+        .metadata;
     let supports_cimd = authorization_server_supports_cimd(&metadata);
     manager.set_metadata(metadata);
 
@@ -2188,7 +2192,7 @@ mod tests {
     /// `web.rs`'s hand-rolled `TcpListener` test-server idiom (no mocking
     /// crate dependency, no real network access — loopback only). Serves 404
     /// for every well-known discovery probe, which makes
-    /// `AuthorizationManager::discover_metadata` fall back to its
+    /// `AuthorizationManager::resolve_metadata` fall back to its
     /// derive-from-base-url legacy endpoints (`{base}/authorize`,
     /// `{base}/token`, `{base}/register`); a Dynamic Client Registration
     /// response at `POST /register` when `register_client_id` is `Some`
