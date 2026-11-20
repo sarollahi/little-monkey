@@ -54,7 +54,7 @@ test('malformed release version produces a structured failure', () => {
 
 test('rejects an artifact published from a repository other than the updater endpoint', () => {
   const result = run(manifest({ platforms: { 'darwin-aarch64': {
-    ...entry, url: 'https://github.com/AA-Box/little-monkey/releases/download/1.10.0/Little.Monkey_aarch64.app.tar.gz',
+    ...entry, url: 'https://github.com/another-owner/little-monkey/releases/download/1.10.0/Little.Monkey_aarch64.app.tar.gz',
   } } }));
   assert.equal(result.status, 1);
   assert.equal(result.output.code, 'ARTIFACT_URL_INVALID');
