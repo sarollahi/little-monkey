@@ -35,3 +35,28 @@ The task command submits a run and returns its ID. Follow it with `monkey task a
 Rerun `node --test normalize.test.mjs` yourself. A successful result requires all tests to pass **and** the diff to contain only justified changes. Inspect `git diff -- normalize.mjs normalize.test.mjs` from the repository root (or the files directly if you copied the directory outside Git).
 
 For a clean repeat, restore these example files from Git or work in a fresh copy. The [step-by-step first run](../../docs/first-run.md) covers installation and recording.
+
+## Write verifiable evidence
+
+From the repository root, before asking the agent:
+
+```sh
+node scripts/first-run-acceptance.mjs baseline --output "$HOME/lm-baseline.json"
+```
+
+After the agent edits the fixture, independently verify with the exact model,
+runtime, app version and number of attempts:
+
+```sh
+node scripts/first-run-acceptance.mjs verify \
+  --workspace examples/first-run --base HEAD \
+  --model "EXACT_MODEL" --runtime "EXACT_RUNTIME" \
+  --app-version "INSTALLED_VERSION" --attempts 1 \
+  --output "$HOME/lm-after.json"
+```
+
+Recordings must also show the actual permission prompts and their outcomes:
+the script cannot certify UI approvals. Both JSON files contain real command
+output, not simulated agent output. Keep them outside the Git checkout.
+A functional pass still requires manual permission, installer, and runtime
+checks; measured performance is deliberately unavailable in this script.

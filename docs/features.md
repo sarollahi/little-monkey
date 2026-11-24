@@ -1,7 +1,25 @@
 # Features
 
-What Little Monkey does today on the `develop` tree. Where a feature is
-narrower than its name suggests, the boundary is in [Limitations](limitations.md).
+Implemented and documented capabilities on the **`develop` branch**, not a
+guarantee that every capability is present in the [latest release](https://github.com/sarollahi/little-monkey/releases/latest).
+Compare a published installer to its exact Git tag and release notes.
+This inventory is a code/documentation map, **not** independently completed
+cross-platform acceptance evidence. Where a feature is narrower than its
+name suggests, the boundary is in [Limitations](limitations.md).
+
+## Release proof and first-run coding task
+
+- The [first-run walkthrough](first-run.md) uses a checked-in, deliberately
+  failing Node fixture. The acceptance runner captures actual test output and
+  exact Git diffs, while app permission decisions remain manually inspected.
+- The [Autonomous Tasks](autonomous-tasks.md) feature is a bounded,
+  daemon-backed objective/plan/review process with policy-controlled delivery.
+  A queued task is not an accepted result, and `WAITING_USER` or insufficient
+  verification is not a passed check. Ordinary UI chat turns do not gain
+  crash-resumable execution merely because daemon tasks are durable.
+- The [release-readiness report](release-readiness-2026-11-15.md) distinguishes
+  source-level checks from unverified physical installs, upgrade rollback,
+  model quality and performance on real hosts.
 
 ## Chat and collaboration
 

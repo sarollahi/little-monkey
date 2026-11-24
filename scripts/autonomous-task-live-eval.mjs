@@ -20,6 +20,12 @@ if (!target) {
 const repository = mkdtempSync(join(tmpdir(), "little-monkey-live-autonomous-eval-"));
 const keep = process.env.LITTLE_MONKEY_KEEP_EVAL_REPO === "1";
 const startedAt = Date.now();
+const maxWaitSeconds = Number(arg("--timeout-seconds") ?? "900");
+if (!Number.isInteger(maxWaitSeconds) || maxWaitSeconds < 30 || maxWaitSeconds > 3600) {
+  throw new Error("--timeout-seconds must be 30..3600");
+}
+let activeRunId = null;
+let authoritativeStatus = null;
 
 function write(path, content) {
   mkdirSync(dirname(join(repository, path)), { recursive: true });
@@ -36,6 +42,7 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     env: process.env,
     maxBuffer: 16 * 1024 * 1024,
+    timeout: options.timeoutMs ?? maxWaitSeconds * 1000,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -107,17 +114,27 @@ try {
   const startOutput = run(monkey, ["task", "start", objective, "--target", target, "--workspace", repository, "--json"], { cwd: repository });
   const start = parseJsonOutput(startOutput);
   const runId = findRunId(start);
+  activeRunId = runId;
   if (!runId) throw new Error(`monkey task start did not return a run id: ${startOutput.slice(-4000)}`);
 
   const attachOutput = run(monkey, ["task", "attach", runId, "--follow", "--json"], { cwd: repository });
-  const attached = parseJsonOutput(attachOutput);
+  const attached = parseJsonOutput(attachOutput); // The last EVENT, not a terminal verdict.
+  // The real CLI prints JSONL events from attach. It never reports the
+  // authoritative terminal RunStatus there. Query the durable run ledger.
+  const statusOutput = run(monkey, ["task", "status", "--run-id", runId, "--json"], { cwd: repository });
+  const statusRows = parseJsonOutput(statusOutput);
+  const statusRow = (Array.isArray(statusRows) ? statusRows : [statusRows])
+    .find((entry) => entry && entry.run_id === runId);
+  authoritativeStatus = statusRow?.status ?? null;
+  if (authoritativeStatus !== "succeeded") {
+    throw new Error(`Live evaluation run ${runId} ended as ${authoritativeStatus ?? "unknown"}, not succeeded`);
+  }
 
   run("npm", ["test"], { cwd: repository });
   const changed = changedFiles();
   if (!changed.includes("src/math.mjs")) throw new Error(`Model run did not mutate src/math.mjs. Changed files: ${changed.join(", ") || "none"}`);
-  for (const forbidden of ["test.mjs", "MONKEY.md"]) {
-    if (changed.includes(forbidden)) throw new Error(`Model run changed forbidden evaluation file ${forbidden}.`);
-  }
+  const unrelated = changed.filter((path) => path !== "src/math.mjs");
+  if (unrelated.length > 0) throw new Error(`Model run made unrelated changes: ${unrelated.join(", ")}`);
   const source = readFileSync(join(repository, "src/math.mjs"), "utf8");
   if (source.includes("a - b")) throw new Error("Production bug remains after the autonomous run.");
 
@@ -128,6 +145,7 @@ try {
     changedFiles: changed,
     verification: "npm test",
     verified: true,
+    authoritativeStatus,
     wallTimeMs: Date.now() - startedAt,
     finalRun: attached,
     repository: keep ? repository : undefined,
@@ -135,6 +153,12 @@ try {
 } catch (error) {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   console.error(`Evaluation repository: ${repository}`);
+  if (activeRunId && !["succeeded", "failed", "cancelled", "needs_reconciliation"].includes(authoritativeStatus ?? "")) {
+    const cancellation = spawnSync(monkey, ["task", "cancel", activeRunId], {
+      cwd: repository, encoding: "utf8", timeout: 30_000,
+    });
+    console.error(`Bounded cancellation of ${activeRunId}: ${cancellation.status === 0 ? "requested" : cancellation.error?.message ?? cancellation.stderr ?? "failed"}`);
+  }
   process.exitCode = 1;
 } finally {
   if (!keep && process.exitCode !== 1) rmSync(repository, { recursive: true, force: true });

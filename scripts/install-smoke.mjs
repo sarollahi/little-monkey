@@ -22,7 +22,8 @@
  * release gate that goes green because it found nothing to install is worse
  * than no gate.
  *
- * Only a real failure exits non-zero. A skip is reported, not fatal: failing
+ * In release mode (`--require-clean`), a skipped clean install exits non-zero.
+ * Other skips remain visible but do not silently claim an executed test. Failing
  * the release because a leg was not applicable would train everyone to ignore
  * it.
  *
@@ -64,9 +65,11 @@ const artifactsDir = arg("artifacts");
 const previousDir = arg("previous");
 const platform = process.platform;
 const legs = [];
+const requireClean = process.argv.includes("--require-clean");
+const requireUpgrade = requireClean && Boolean(arg("previous-version"));
 
 function report(name, result) {
-  legs.push(result);
+  legs.push({ ...result, name });
   const line = formatLeg(name, result);
   console.log(line);
   // Also to the job summary, so a skip is visible without opening the log —
@@ -140,7 +143,7 @@ function unpack(plan, artifactsDir, into) {
 
 /** The one payload path that is also a runnable CLI, if it was installed. */
 function cliPath(root, installed) {
-  const sidecar = installed.find((path) => /(^|\/)monkey(\.exe)?$/.test(path));
+  const sidecar = installed.find((path) => /(^|\/)(monkey|monkey-cli)(\.exe)?$/.test(path));
   return sidecar ? join(root, ...sidecar.split("/")) : null;
 }
 
@@ -158,7 +161,8 @@ function main() {
       outcome: OUTCOME.Skip,
       reason: "the clean-install leg did not run, so there is nothing to upgrade",
     });
-    process.exit(exitCodeFor(legs));
+    process.exitCode = exitCodeFor(legs, { requireClean, requireUpgrade });
+    return;
   }
 
   const assets = readdirSync(artifactsDir);
@@ -172,7 +176,8 @@ function main() {
       outcome: OUTCOME.Skip,
       reason: "the clean-install leg did not run, so there is nothing to upgrade",
     });
-    process.exit(exitCodeFor(legs));
+    process.exitCode = exitCodeFor(legs, { requireClean, requireUpgrade });
+    return;
   }
 
   const scratch = mkdtempSync(join(tmpdir(), "little-monkey-install-smoke-"));
@@ -181,7 +186,8 @@ function main() {
     const failure = unpack(plan, artifactsDir, prefix);
     if (failure) {
       report("clean install", { outcome: OUTCOME.Fail, reason: failure });
-      process.exit(exitCodeFor(legs));
+      process.exitCode = exitCodeFor(legs, { requireClean, requireUpgrade });
+    return;
     }
 
     const installed = walk(prefix);
@@ -219,7 +225,8 @@ function main() {
     });
     if (upgrade.outcome === OUTCOME.Skip) {
       report("upgrade", upgrade);
-      process.exit(exitCodeFor(legs));
+      process.exitCode = exitCodeFor(legs, { requireClean, requireUpgrade });
+    return;
     }
 
     const upgradePrefix = join(scratch, "upgrade");
@@ -229,7 +236,8 @@ function main() {
         outcome: OUTCOME.Fail,
         reason: `the previous release would not unpack: ${previousFailure}`,
       });
-      process.exit(exitCodeFor(legs));
+      process.exitCode = exitCodeFor(legs, { requireClean, requireUpgrade });
+    return;
     }
 
     // Stand-in for the user's data directory, placed inside the install prefix
@@ -244,7 +252,8 @@ function main() {
         outcome: OUTCOME.Fail,
         reason: `installing over the previous release failed: ${overFailure}`,
       });
-      process.exit(exitCodeFor(legs));
+      process.exitCode = exitCodeFor(legs, { requireClean, requireUpgrade });
+    return;
     }
 
     const after = existsSync(dataFile) ? readFileSync(dataFile, "utf8") : null;
@@ -257,7 +266,8 @@ function main() {
     rmSync(scratch, { recursive: true, force: true });
   }
 
-  process.exit(exitCodeFor(legs));
+  process.exitCode = exitCodeFor(legs, { requireClean, requireUpgrade });
+    return;
 }
 
 main();

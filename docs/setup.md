@@ -97,6 +97,31 @@ cd extensions/little-monkey-vscode
 LITTLE_MONKEY_COMPLETION_MODEL='your-exact-fim-tag' npm run benchmark:completions
 ```
 
+## Next-release acceptance and hardware checks
+
+The [first-run walkthrough](first-run.md) supplies an intentionally failing
+coding test and a recorder that saves real tests, scoped diffs and independent
+probes. Its `FUNCTIONAL_PASS_MANUAL_REVIEW_REQUIRED` result is **not**
+proof of an installed model or successful permission review. The
+[acceptance protocol](release-acceptance.md) and
+[readiness report](release-readiness-2026-11-15.md) list live checks.
+
+On the first-run **Model** step, the app requests the same real hardware
+snapshot used by Runtime Hub. Check OS/CPU architecture, detected local
+runtimes and available RAM. MLX requires Apple Silicon with working Metal;
+on an unsupported or unprobed host, do not download MLX packages hoping they
+will work. Managed llama.cpp, Ollama and configured providers are
+alternatives **where available and compatible**. Model tool calling,
+quantization/memory fit, driver health and provider credentials still require
+a real attempted run. A failed driver probe must be recorded as unknown,
+not silently treated as success. Never label a model "working" because it
+was merely listed.
+
+Before a release, run the real cross-platform install, signature,
+upgrade, rollback and cancellation checks. The installer smoke script
+extracts/checks package payloads on CI runners and **does not** replace
+physical OS install or rollback testing.
+
 ## Model setup
 
 0. **From the composer** — the model picker above the composer is searchable across local, Ollama, and provider models and adds a new one inline, so none of the steps below require opening Settings first.

@@ -44,9 +44,20 @@ const decode = (encoded, label) => {
   return text;
 };
 
+// Release artifacts must come from the same repository the shipped app's
+// updater endpoint trusts. Deriving it from tauri.conf.json keeps the two from
+// drifting apart when the canonical repository moves.
+const releaseRepositoryPath = (endpoint) => {
+  const match = typeof endpoint === 'string'
+    && /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/releases\/latest\/download\/latest\.json$/.exec(endpoint);
+  if (!match) fail('ENDPOINT_INVALID');
+  return `/${match[1]}`;
+};
+
 try {
   if (!Object.hasOwn(formats, platform) || !installedVersion) fail('USAGE');
   const source = config.plugins.updater.endpoints[0];
+  const repositoryPath = releaseRepositoryPath(source);
   const response = manifestFile ? null : await fetch(source, { signal: AbortSignal.timeout(15000) });
   if (response && !response.ok) fail('MANIFEST_UNAVAILABLE');
   const raw = manifestFile ? readFileSync(manifestFile, 'utf8') : await response.text();
@@ -60,7 +71,7 @@ try {
   try { url = new URL(entry.url); } catch { fail('ARTIFACT_URL_INVALID'); }
   if (url.protocol !== 'https:' || url.host !== 'github.com' || url.username ||
       url.password || url.search || url.hash ||
-      !url.pathname.startsWith(`/AA-Box/little-monkey/releases/download/${manifest.version}/`) ||
+      !url.pathname.startsWith(`${repositoryPath}/releases/download/${manifest.version}/`) ||
       !formats[platform].test(url.pathname)) fail('ARTIFACT_URL_INVALID');
   const name = basename(url.pathname);
   const signature = decode(entry.signature, 'SIGNATURE_MISSING');

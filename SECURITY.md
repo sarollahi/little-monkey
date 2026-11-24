@@ -11,7 +11,7 @@ a hosted product would get.
 
 Please report security issues privately, not through a public GitHub issue.
 
-- Preferred: [open a private security advisory](https://github.com/AA-Box/little-monkey/security/advisories/new)
+- Preferred: [open a private security advisory](https://github.com/sarollahi/little-monkey/security/advisories/new)
   on this repository.
 - Alternative: email **ahmad.sarollahi@gmail.com** with a description, steps
   to reproduce, and the affected component (app version / commit SHA).

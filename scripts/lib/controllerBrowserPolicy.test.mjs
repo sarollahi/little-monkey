@@ -62,6 +62,9 @@ const PREVIOUS_CSP =
 
 const FEATURES = ["camera", "microphone", "geolocation", "display-capture"];
 const LAUNCH_TIMEOUT_MS = 30_000;
+const CDP_COMMAND_TIMEOUT_MS = 15_000;
+const SHUTDOWN_TIMEOUT_MS = 5_000;
+
 
 const ASSETS = {
   "/remote": ["text/html; charset=utf-8", "ui/index.html"],
@@ -199,6 +202,7 @@ class Chrome {
       ],
       { stdio: ["ignore", "ignore", "pipe"] },
     );
+    try {
     const endpoint = await new Promise((resolve, reject) => {
       let stderr = "";
       const timer = setTimeout(
@@ -221,12 +225,24 @@ class Chrome {
     });
     const socket = new WebSocket(endpoint);
     await new Promise((resolve, reject) => {
-      socket.addEventListener("open", resolve, { once: true });
-      socket.addEventListener("error", () => reject(new Error("could not attach to the browser")), {
-        once: true,
-      });
+      const timer = setTimeout(
+        () => reject(new Error("timed out attaching to Chrome's DevTools socket")),
+        LAUNCH_TIMEOUT_MS,
+      );
+      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+      socket.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("could not attach to the browser"));
+      }, { once: true });
     });
     return new Chrome(child, socket, profile);
+    } catch (error) {
+      // A launch/attachment failure happened before the caller received a
+      // Chrome handle. Clean up here or Chromium keeps the CI process alive.
+      child.kill("SIGKILL");
+      rmSync(profile, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   constructor(child, socket, profile) {
@@ -242,19 +258,41 @@ class Chrome {
         const settle = this.pending.get(frame.id);
         this.pending.delete(frame.id);
         if (!settle) return;
+        clearTimeout(settle.timer);
         if (frame.error) settle.reject(new Error(`${frame.error.message} (${frame.error.code})`));
         else settle.resolve(frame.result);
         return;
       }
       for (const waiter of this.events.splice(0)) waiter(frame);
     });
+    const failPending = () => {
+      for (const waiter of this.pending.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error("DevTools WebSocket closed during an outstanding command"));
+      }
+      this.pending.clear();
+    };
+    socket.addEventListener("close", failPending);
+    socket.addEventListener("error", failPending);
   }
 
   send(method, params = {}, sessionId) {
     const id = (this.nextId += 1);
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      // Without a per-command deadline, a crashed browser or lost CDP
+      // response can hang the entire frontend CI until job-level timeout.
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP ${method} timed out after ${CDP_COMMAND_TIMEOUT_MS}ms`));
+      }, CDP_COMMAND_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      try {
+        this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -290,9 +328,30 @@ class Chrome {
   }
 
   async close() {
-    this.socket.close();
-    this.child.kill();
-    await new Promise((resolve) => this.child.on("exit", resolve));
+    try { this.socket.close(); } catch { /* already closed */ }
+    // `exit` may have fired *before* cleanup. Listening only afterward
+    // leaves a permanently unresolved promise and an eight-minute CI hang.
+    if (this.child.exitCode === null && this.child.signalCode === null) {
+      const exited = new Promise((resolve) => this.child.once("exit", () => resolve(true)));
+      this.child.kill();
+      const exitedSoon = await Promise.race([
+        exited,
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(false), SHUTDOWN_TIMEOUT_MS);
+          timer.unref();
+        }),
+      ]);
+      if (!exitedSoon) {
+        this.child.kill("SIGKILL");
+        await Promise.race([
+          exited,
+          new Promise((resolve) => {
+            const timer = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
+            timer.unref();
+          }),
+        ]);
+      }
+    }
     rmSync(this.profile, { recursive: true, force: true });
   }
 }
@@ -343,8 +402,9 @@ test("the served controller policy permits every browser API the client calls", 
 
   const policy = policies();
   const { server, origin } = await serveController(policy);
-  const chrome = await Chrome.launch(executablePath);
+  let chrome = null;
   try {
+    chrome = await Chrome.launch(executablePath);
     const controller = await chrome.evaluate(`${origin}/remote`, INSPECT);
     assert.equal(controller.error, undefined, controller.error);
     assert.equal(controller.secureContext, true, "127.0.0.1 must be a secure context");
@@ -378,7 +438,10 @@ test("the served controller policy permits every browser API the client calls", 
     assert.equal(previous.dataAudio, false, "the previous CSP must block data: audio");
     assert.equal(previous.blobAudio, false, "the previous CSP must block blob: audio");
   } finally {
-    await chrome.close();
-    await new Promise((resolve) => server.close(resolve));
+    // Close both resources even if Chromium fails during launch or shutdown.
+    try { if (chrome) await chrome.close(); } finally {
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    }
   }
 });

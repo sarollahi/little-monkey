@@ -349,7 +349,7 @@ pub struct GitSkillRequest {
 /// Update `COMMUNITY_SKILLS_COMMIT` whenever `skills/` changes on the
 /// branch these constants track, so bare-slug installs keep resolving to a
 /// real, reviewed snapshot rather than a moving ref.
-pub const COMMUNITY_SKILLS_REPOSITORY_URL: &str = "https://github.com/AA-Box/little-monkey";
+pub const COMMUNITY_SKILLS_REPOSITORY_URL: &str = "https://github.com/sarollahi/little-monkey";
 pub const COMMUNITY_SKILLS_COMMIT: &str = "c45b3e562fed189599080b3187b49fd12be3489b";
 
 /// Resolves a bare community-skill slug (e.g. `changelog-curator`) to a

@@ -109,6 +109,21 @@ pub(super) fn cli_beside_test_binary(_current: &Path) -> Option<PathBuf> {
 /// harness answers `--list` with its test names, and the CLI refuses the flag.
 /// One exec per candidate, once per test run.
 fn locate_cli_binary() -> PathBuf {
+    // CI and external integration harnesses may build the genuine CLI before
+    // running Rust tests. The compiled test executable can live under a Cargo
+    // build-script out/ directory instead of target/debug/deps, so deriving
+    // the CLI from current_exe() alone is not reliable across toolchains.
+    if let Some(configured) = std::env::var_os(CLI_ENV) {
+        let path = PathBuf::from(configured);
+        assert!(is_the_cli(&path), "{CLI_ENV} is not the real executable CLI: {}", path.display());
+        return path;
+    }
+    let manifest_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target").join("debug")
+        .join(if cfg!(windows) { "monkey-cli.exe" } else { "monkey-cli" });
+    if is_the_cli(&manifest_bin) {
+        return manifest_bin;
+    }
     let current = std::env::current_exe().expect("test binary path");
     let deps = current.parent().expect("deps directory").to_path_buf();
     let profile = deps.parent().expect("profile directory").to_path_buf();
